@@ -1,7 +1,7 @@
 {
   "name": "uinventario-mobile",
   "main": "expo-router/entry",
-  "version": "1.0.0",
+  "version": "0.1.0",
   "dependencies": {
     "@expo/ui": "~57.0.14",
     "expo": "~57.0.18",
@@ -29,15 +29,22 @@
   },
   "devDependencies": {
     "@types/react": "~19.2.2",
+    "eslint": "^9.39.5",
+    "eslint-config-expo": "^57.0.2",
+    "expo-doctor": "^1.20.4",
     "typescript": "~6.0.3"
   },
   "scripts": {
     "start": "expo start",
-    "reset-project": "node ./scripts/reset-project.js",
     "android": "expo start --android",
     "ios": "expo start --ios",
     "web": "expo start --web",
-    "lint": "expo lint"
+    "lint": "expo lint",
+    "typecheck": "tsc --noEmit",
+    "doctor": "expo-doctor",
+    "export:android": "expo export --platform android --output-dir .artifacts/android",
+    "export:ios": "expo export --platform ios --output-dir .artifacts/ios",
+    "verify": "npm run lint && npm run typecheck && npm run doctor && npm run export:android && npm run export:ios"
   },
   "private": true
 }

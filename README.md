@@ -1,56 +1,35 @@
-# Welcome to your Expo app 👋
+# UInventario Mobile
 
-This is an [Expo](https://expo.dev) project created with [`create-expo-app`](https://www.npmjs.com/package/create-expo-app).
+Cliente móvil Expo para UInventario. Este repositorio contiene el shell y la configuración de
+navegación; las reglas de inventario permanecen en la API versionada.
 
-## Get started
+## Desarrollo local
 
-1. Install dependencies
+Requiere Node.js 22 y npm.
 
-   ```bash
-   npm install
-   ```
-
-2. Start the app
-
-   ```bash
-   npx expo start
-   ```
-
-In the output, you'll find options to open the app in a
-
-- [development build](https://docs.expo.dev/develop/development-builds/introduction/)
-- [Android emulator](https://docs.expo.dev/workflow/android-studio-emulator/)
-- [iOS simulator](https://docs.expo.dev/workflow/ios-simulator/)
-- [Expo Go](https://expo.dev/go), a limited sandbox for trying out app development with Expo
-
-You can start developing by editing the files inside the **app** directory. This project uses [file-based routing](https://docs.expo.dev/router/introduction).
-
-## Get a fresh project
-
-When you're ready, run:
-
-```bash
-npm run reset-project
+```powershell
+npm ci
+Copy-Item .env.example .env.local
+npm start
 ```
 
-This command will move the starter code to the **app-example** directory and create a blank **app** directory where you can start developing.
+Desde Expo CLI se puede abrir Android, iOS o Web. `.env.local` sólo debe contener configuración
+pública. Las variables con prefijo `EXPO_PUBLIC_` se incorporan al bundle y nunca deben usarse para
+tokens, contraseñas o claves privadas.
 
-### Other setup steps
+## Ambientes
 
-- To set up ESLint for linting, run `npx expo lint`, or follow our guide on ["Using ESLint and Prettier"](https://docs.expo.dev/guides/using-eslint/)
-- If you'd like to set up unit testing, follow our guide on ["Unit Testing with Jest"](https://docs.expo.dev/develop/unit-testing/)
-- Learn more about the TypeScript setup in this template in our guide on ["Using TypeScript"](https://docs.expo.dev/guides/typescript/)
+- `development` consume la API de Dev de Cloud Run.
+- `production` consume la API de Prod mediante el perfil `production` de `eas.json`.
 
-## Learn more
+Los perfiles mantienen separados los endpoints públicos. Las futuras credenciales de sesión se
+guardarán en almacenamiento seguro del dispositivo y no en variables de build.
 
-To learn more about developing your project with Expo, look at the following resources:
+## Validación
 
-- [Expo documentation](https://docs.expo.dev/): Learn fundamentals, or go into advanced topics with our [guides](https://docs.expo.dev/guides).
-- [Learn Expo tutorial](https://docs.expo.dev/tutorial/introduction/): Follow a step-by-step tutorial where you'll create a project that runs on Android, iOS, and the web.
+```powershell
+npm run verify
+```
 
-## Join the community
-
-Join our community of developers creating universal apps.
-
-- [Expo on GitHub](https://github.com/expo/expo): View our open source platform and contribute.
-- [Discord community](https://chat.expo.dev): Chat with Expo users and ask questions.
+El gate ejecuta lint, typecheck, Expo Doctor y genera los bundles de producción para Android e iOS.
+GitHub Actions ejecuta el mismo gate en PRs y en las ramas `develop` y `master`.
