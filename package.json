@@ -6,12 +6,14 @@
     "@expo/ui": "~57.0.14",
     "expo": "~57.0.18",
     "expo-constants": "~57.0.16",
+    "expo-crypto": "~57.0.2",
     "expo-device": "~57.0.1",
     "expo-font": "~57.0.2",
     "expo-glass-effect": "~57.0.1",
     "expo-image": "~57.0.3",
     "expo-linking": "~57.0.8",
     "expo-router": "~57.0.17",
+    "expo-secure-store": "~57.0.2",
     "expo-splash-screen": "~57.0.8",
     "expo-status-bar": "~57.0.1",
     "expo-symbols": "~57.0.2",
@@ -28,10 +30,12 @@
     "react-native-worklets": "0.10.1"
   },
   "devDependencies": {
+    "@types/jest": "^29.5.14",
     "@types/react": "~19.2.2",
     "eslint": "^9.39.5",
     "eslint-config-expo": "^57.0.2",
     "expo-doctor": "^1.20.4",
+    "jest-expo": "^57.0.5",
     "typescript": "~6.0.3"
   },
   "scripts": {
@@ -42,9 +46,16 @@
     "lint": "expo lint",
     "typecheck": "tsc --noEmit",
     "doctor": "expo-doctor",
+    "test": "jest --runInBand",
     "export:android": "expo export --platform android --output-dir .artifacts/android",
     "export:ios": "expo export --platform ios --output-dir .artifacts/ios",
-    "verify": "npm run lint && npm run typecheck && npm run doctor && npm run export:android && npm run export:ios"
+    "verify": "npm run lint && npm run typecheck && npm test && npm run doctor && npm run export:android && npm run export:ios"
+  },
+  "jest": {
+    "preset": "jest-expo",
+    "testMatch": [
+      "**/*.spec.ts"
+    ]
   },
   "private": true
 }

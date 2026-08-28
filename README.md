@@ -3,6 +3,10 @@
 Cliente móvil Expo para UInventario. Este repositorio contiene el shell y la configuración de
 navegación; las reglas de inventario permanecen en la API versionada.
 
+La sesión Mobile usa un token opaco rotatorio guardado con `expo-secure-store`; la contraseña nunca
+se persiste. El bootstrap se valida contra tenant, usuario y dispositivo antes de exponer catálogo,
+sucursales, cajas o permisos.
+
 ## Desarrollo local
 
 Requiere Node.js 22 y npm.
