@@ -16,6 +16,14 @@ import {
   SaleData,
   SaleInput,
 } from '@/pos/contracts';
+import {
+  CreateInventoryTransferInput,
+  InventoryCountInput,
+  InventoryTransfer,
+  PurchaseOrder,
+  ReceiveInventoryTransferInput,
+  ReceivePurchaseOrderInput,
+} from '@/inventory/contracts';
 
 type SessionStatus = 'booting' | 'anonymous' | 'authenticated';
 
@@ -36,6 +44,24 @@ interface SessionContextValue {
   queueCashSale(quote: PosQuote, input: CashSaleInput, idempotencyKey: string): Promise<OfflineCommand>;
   offlineCommands(): Promise<OfflineCommand[]>;
   flushOffline(): Promise<OfflineFlushSummary>;
+  queueInventoryCount(input: InventoryCountInput, idempotencyKey: string): Promise<OfflineCommand>;
+  inventoryTransfers(): Promise<InventoryTransfer[]>;
+  createInventoryTransfer(
+    input: CreateInventoryTransferInput,
+    idempotencyKey: string,
+  ): Promise<InventoryTransfer>;
+  dispatchInventoryTransfer(transferId: string, idempotencyKey: string): Promise<InventoryTransfer>;
+  receiveInventoryTransfer(
+    transferId: string,
+    input: ReceiveInventoryTransferInput,
+    idempotencyKey: string,
+  ): Promise<InventoryTransfer>;
+  purchaseOrders(query?: string): Promise<PurchaseOrder[]>;
+  receivePurchaseOrder(
+    orderId: string,
+    input: ReceivePurchaseOrderInput,
+    idempotencyKey: string,
+  ): Promise<PurchaseOrder>;
   clearError(): void;
 }
 
@@ -141,6 +167,46 @@ export function SessionProvider({ children }: PropsWithChildren) {
     return runValue(() => manager.flushOffline(session));
   }
 
+  async function queueInventoryCount(input: InventoryCountInput, idempotencyKey: string) {
+    if (!session) throw new ApiError(401, 'INVALID_SESSION', 'La sesión no es válida.');
+    return runValue(() => manager.queueInventoryCount(session, input, idempotencyKey));
+  }
+
+  function inventoryTransfers() {
+    return runValue(() => manager.inventoryTransfers());
+  }
+
+  function createInventoryTransfer(
+    input: CreateInventoryTransferInput,
+    idempotencyKey: string,
+  ) {
+    return runValue(() => manager.createInventoryTransfer(input, idempotencyKey));
+  }
+
+  function dispatchInventoryTransfer(transferId: string, idempotencyKey: string) {
+    return runValue(() => manager.dispatchInventoryTransfer(transferId, idempotencyKey));
+  }
+
+  function receiveInventoryTransfer(
+    transferId: string,
+    input: ReceiveInventoryTransferInput,
+    idempotencyKey: string,
+  ) {
+    return runValue(() => manager.receiveInventoryTransfer(transferId, input, idempotencyKey));
+  }
+
+  function purchaseOrders(query = '') {
+    return runValue(() => manager.purchaseOrders(query));
+  }
+
+  function receivePurchaseOrder(
+    orderId: string,
+    input: ReceivePurchaseOrderInput,
+    idempotencyKey: string,
+  ) {
+    return runValue(() => manager.receivePurchaseOrder(orderId, input, idempotencyKey));
+  }
+
   async function run(action: () => Promise<void>) {
     setBusy(true);
     setError(null);
@@ -188,6 +254,13 @@ export function SessionProvider({ children }: PropsWithChildren) {
         queueCashSale,
         offlineCommands,
         flushOffline,
+        queueInventoryCount,
+        inventoryTransfers,
+        createInventoryTransfer,
+        dispatchInventoryTransfer,
+        receiveInventoryTransfer,
+        purchaseOrders,
+        receivePurchaseOrder,
         clearError: () => setError(null),
       }}>
       {children}

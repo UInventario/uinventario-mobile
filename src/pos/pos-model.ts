@@ -118,6 +118,7 @@ function assertOfflineReady(snapshot: BootstrapSnapshot, now: number) {
 function pendingQuantities(commands: OfflineCommand[]) {
   const result = new Map<string, bigint>();
   for (const command of commands) {
+    if (command.kind !== 'CASH_SALE') continue;
     if (
       command.status === 'CONFIRMED' ||
       (command.status === 'ERROR' && !command.retryable)

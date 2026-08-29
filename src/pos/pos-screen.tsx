@@ -85,7 +85,7 @@ function ScopedPosScreen() {
       setPendingCount((await offlineCommands()).filter(isPending).length);
       if (result.confirmed || result.rejected) {
         setNotice(
-          `${result.confirmed} venta(s) sincronizada(s)` +
+          `${result.confirmed} operación(es) sincronizada(s)` +
             (result.rejected ? `; ${result.rejected} rechazada(s).` : '.'),
         );
         await refresh();

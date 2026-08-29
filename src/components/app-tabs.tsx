@@ -37,6 +37,11 @@ export default function AppTabs() {
         <NativeTabs.Trigger.Label>Venta</NativeTabs.Trigger.Label>
         <NativeTabs.Trigger.Icon sf="cart" md="point_of_sale" />
       </NativeTabs.Trigger>
+
+      <NativeTabs.Trigger name="inventory">
+        <NativeTabs.Trigger.Label>Operar</NativeTabs.Trigger.Label>
+        <NativeTabs.Trigger.Icon sf="shippingbox" md="inventory_2" />
+      </NativeTabs.Trigger>
     </NativeTabs>
   );
 }

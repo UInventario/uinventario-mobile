@@ -98,7 +98,17 @@ export interface OfflineCashSalePayload extends CashSaleInput {
   };
 }
 
-export interface OfflineCommand {
+export interface OfflineInventoryCountPayload {
+  productId: string;
+  locationId: string;
+  countedQuantity: string;
+  snapshotQuantity: string;
+  reason: string;
+  reference: string;
+  capturedAt: string;
+}
+
+interface OfflineCommandBase {
   protocolVersion: '1.0';
   commandId: string;
   idempotencyKey: string;
@@ -107,14 +117,19 @@ export interface OfflineCommand {
   createdAt: string;
   valuationMethod: BootstrapSnapshot['valuationPolicy']['method'];
   valuationPolicyVersion: number;
-  kind: 'CASH_SALE';
-  payload: OfflineCashSalePayload;
   status: 'PENDING' | 'SENT' | 'CONFIRMED' | 'ERROR';
   attempts: number;
   retryable: boolean;
   result: unknown | null;
   error: unknown | null;
 }
+
+export type OfflineCommand =
+  | (OfflineCommandBase & { kind: 'CASH_SALE'; payload: OfflineCashSalePayload })
+  | (OfflineCommandBase & {
+      kind: 'INVENTORY_COUNT';
+      payload: OfflineInventoryCountPayload;
+    });
 
 export interface OfflineCommandResult {
   commandId: string;

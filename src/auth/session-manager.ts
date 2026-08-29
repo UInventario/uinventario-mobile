@@ -20,6 +20,14 @@ import {
   SaleData,
   SaleInput,
 } from '@/pos/contracts';
+import {
+  CreateInventoryTransferInput,
+  InventoryCountInput,
+  InventoryTransfer,
+  PurchaseOrder,
+  ReceiveInventoryTransferInput,
+  ReceivePurchaseOrderInput,
+} from '@/inventory/contracts';
 
 export class SessionManager {
   private token: string | null = null;
@@ -87,7 +95,7 @@ export class SessionManager {
       throw new ApiError(
         409,
         'OFFLINE_COMMANDS_PENDING',
-        'Sincroniza las ventas pendientes antes de cambiar de sucursal o caja.',
+        'Sincroniza las operaciones pendientes antes de cambiar de sucursal o caja.',
       );
     }
     const token = this.requireToken();
@@ -151,6 +159,60 @@ export class SessionManager {
       this.localData.flush(session.bootstrap.scope, (commands) =>
         this.api.commands(token, commands),
       ),
+    );
+  }
+
+  queueInventoryCount(
+    session: AuthenticatedSession,
+    input: InventoryCountInput,
+    idempotencyKey: string,
+  ): Promise<OfflineCommand> {
+    return this.localData.queueInventoryCount(session.bootstrap, input, idempotencyKey);
+  }
+
+  inventoryTransfers(): Promise<InventoryTransfer[]> {
+    return this.apiRequest(async (token) => (await this.api.inventoryTransfers(token)).data);
+  }
+
+  createInventoryTransfer(
+    input: CreateInventoryTransferInput,
+    idempotencyKey: string,
+  ): Promise<InventoryTransfer> {
+    return this.apiRequest(async (token) =>
+      (await this.api.createInventoryTransfer(token, input, idempotencyKey)).data,
+    );
+  }
+
+  dispatchInventoryTransfer(
+    transferId: string,
+    idempotencyKey: string,
+  ): Promise<InventoryTransfer> {
+    return this.apiRequest(async (token) =>
+      (await this.api.dispatchInventoryTransfer(token, transferId, idempotencyKey)).data,
+    );
+  }
+
+  receiveInventoryTransfer(
+    transferId: string,
+    input: ReceiveInventoryTransferInput,
+    idempotencyKey: string,
+  ): Promise<InventoryTransfer> {
+    return this.apiRequest(async (token) =>
+      (await this.api.receiveInventoryTransfer(token, transferId, input, idempotencyKey)).data,
+    );
+  }
+
+  purchaseOrders(query = ''): Promise<PurchaseOrder[]> {
+    return this.apiRequest(async (token) => (await this.api.purchaseOrders(token, query)).data);
+  }
+
+  receivePurchaseOrder(
+    orderId: string,
+    input: ReceivePurchaseOrderInput,
+    idempotencyKey: string,
+  ): Promise<PurchaseOrder> {
+    return this.apiRequest(async (token) =>
+      (await this.api.receivePurchaseOrder(token, orderId, input, idempotencyKey)).data,
     );
   }
 
