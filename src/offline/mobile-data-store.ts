@@ -1,7 +1,12 @@
 import * as Crypto from 'expo-crypto';
 import { SQLiteStorage } from 'expo-sqlite/kv-store';
 
-import { BootstrapSnapshot } from '@/auth/contracts';
+import {
+  AuthenticatedSession,
+  BootstrapSnapshot,
+  OfflineChangesData,
+  SessionData,
+} from '@/auth/contracts';
 import {
   CashSaleInput,
   OfflineCashSalePayload,
@@ -11,6 +16,9 @@ import {
 } from '@/pos/contracts';
 
 const STORAGE_PREFIX = 'uinventario-mobile:';
+const SCHEMA_VERSION = 2;
+const MANIFEST_KEY = `${STORAGE_PREFIX}schema`;
+const LEGACY_BOOTSTRAP_KEY = `${STORAGE_PREFIX}bootstrap`;
 
 export interface KeyValueStore {
   getItem(key: string): Promise<string | null>;
@@ -20,13 +28,50 @@ export interface KeyValueStore {
   multiRemove(keys: string[]): Promise<void>;
 }
 
+interface VersionedRecord {
+  schemaVersion: typeof SCHEMA_VERSION;
+  scopeKey: string;
+}
+
+interface SnapshotRecord extends VersionedRecord {
+  storedAt: string;
+  snapshot: BootstrapSnapshot;
+  session: StoredSession | null;
+}
+
+interface StoredSession {
+  data: SessionData;
+  expiresAt: string;
+}
+
+interface OutboxRecord extends VersionedRecord {
+  commands: OfflineCommand[];
+}
+
 export interface OfflineFlushSummary {
   confirmed: number;
   rejected: number;
 }
 
+export class MobileStorageError extends Error {
+  constructor(
+    readonly code: 'CORRUPT' | 'INCOMPATIBLE_SCHEMA',
+    message: string,
+    options?: ErrorOptions,
+  ) {
+    super(message, options);
+  }
+}
+
 export interface MobileDataStore {
-  replace(snapshot: BootstrapSnapshot): Promise<void>;
+  replace(snapshot: BootstrapSnapshot, session?: StoredSession): Promise<void>;
+  snapshot(scope: BootstrapSnapshot['scope']): Promise<BootstrapSnapshot | null>;
+  latest(deviceId: string): Promise<AuthenticatedSession | null>;
+  applyChanges(
+    scope: BootstrapSnapshot['scope'],
+    changes: OfflineChangesData,
+  ): Promise<BootstrapSnapshot>;
+  recover(): Promise<void>;
   clear(): Promise<void>;
   queueCashSale(
     snapshot: BootstrapSnapshot,
@@ -46,6 +91,7 @@ export interface MobileDataStore {
 export class SqliteMobileDataStore implements MobileDataStore {
   private readonly storage: KeyValueStore;
   private operation: Promise<void> = Promise.resolve();
+  private ready: Promise<void> | null = null;
 
   constructor(
     storage: KeyValueStore = new SQLiteStorage('uinventario-mobile.db'),
@@ -54,20 +100,137 @@ export class SqliteMobileDataStore implements MobileDataStore {
     this.storage = storage;
   }
 
-  replace(snapshot: BootstrapSnapshot): Promise<void> {
-    return this.exclusive(() =>
-      this.storage.setItem(`${STORAGE_PREFIX}bootstrap`, JSON.stringify(snapshot)),
-    );
+  replace(snapshot: BootstrapSnapshot, session?: StoredSession): Promise<void> {
+    return this.exclusive(async () => {
+      await this.ensureSchema();
+      this.assertSnapshot(snapshot);
+      await this.writeSnapshot(snapshot, session ?? null);
+    });
+  }
+
+  snapshot(scope: BootstrapSnapshot['scope']): Promise<BootstrapSnapshot | null> {
+    return this.exclusive(async () => {
+      await this.ensureSchema();
+      return (await this.readSnapshotRecord(scope))?.snapshot ?? null;
+    });
+  }
+
+  latest(deviceId: string): Promise<AuthenticatedSession | null> {
+    return this.exclusive(async () => {
+      await this.ensureSchema();
+      const activeScope = await this.storage.getItem(this.activeScopeKey(deviceId));
+      if (!activeScope) return null;
+      const value = await this.storage.getItem(`${STORAGE_PREFIX}snapshot:${activeScope}`);
+      if (!value) {
+        throw new MobileStorageError('CORRUPT', 'La sesión local no tiene bootstrap.');
+      }
+      const record = this.parseSnapshotRecord(value);
+      if (record.snapshot.scope.deviceId !== deviceId) {
+        throw new MobileStorageError('CORRUPT', 'La sesión local pertenece a otro dispositivo.');
+      }
+      return record?.session
+        ? {
+            data: record.session.data,
+            expiresAt: record.session.expiresAt,
+            bootstrap: record.snapshot,
+          }
+        : null;
+    });
+  }
+
+  applyChanges(
+    scope: BootstrapSnapshot['scope'],
+    data: OfflineChangesData,
+  ): Promise<BootstrapSnapshot> {
+    return this.exclusive(async () => {
+      await this.ensureSchema();
+      const record = await this.readSnapshotRecord(scope);
+      if (!record) {
+        throw new MobileStorageError('CORRUPT', 'No existe un bootstrap para aplicar cambios.');
+      }
+      const current = record.snapshot;
+      if (
+        data.protocolVersion !== current.protocolVersion ||
+        this.scopeKey(data.scope) !== this.scopeKey(scope) ||
+        data.identity.user.id !== scope.userId ||
+        data.cursor !== current.initialSyncCursor
+      ) {
+        throw new MobileStorageError('CORRUPT', 'La página incremental no pertenece al alcance local.');
+      }
+
+      const entities = new Map(current.entities.map((entity) => [entityKey(entity), entity]));
+      for (const change of data.changes) {
+        if (change.entity.tenantId !== scope.tenantId) {
+          throw new MobileStorageError('CORRUPT', 'La sincronización contiene datos de otra empresa.');
+        }
+        const key = entityKey(change.entity);
+        if (change.operation === 'DELETE') entities.delete(key);
+        else entities.set(key, change.entity);
+      }
+      const snapshot: BootstrapSnapshot = {
+        ...current,
+        generatedAt: data.generatedAt,
+        sessionExpiresAt: data.sessionExpiresAt,
+        initialSyncCursor: data.nextCursor,
+        freshnessPolicy: data.freshnessPolicy,
+        identity: {
+          ...current.identity,
+          user: {
+            id: data.identity.user.id,
+            roles: data.identity.user.roles,
+            permissions: data.identity.user.permissions,
+          },
+        },
+        entities: [...entities.values()].sort(byEntity),
+      };
+      const session = record.session
+        ? {
+            ...record.session,
+            expiresAt: data.sessionExpiresAt,
+            data: {
+              ...record.session.data,
+              user: {
+                ...record.session.data.user,
+                roles: data.identity.user.roles,
+                permissions: data.identity.user.permissions,
+              },
+            },
+          }
+        : null;
+      await this.writeSnapshot(snapshot, session);
+      return snapshot;
+    });
+  }
+
+  recover(): Promise<void> {
+    return this.exclusive(async () => {
+      const keys = (await this.storage.getAllKeys()).filter(
+        (key) =>
+          key === LEGACY_BOOTSTRAP_KEY ||
+          key.startsWith(`${STORAGE_PREFIX}snapshot:`) ||
+          key.startsWith(`${STORAGE_PREFIX}active-scope:`),
+      );
+      if (keys.length) await this.storage.multiRemove(keys);
+      await this.storage.setItem(
+        MANIFEST_KEY,
+        JSON.stringify({ schemaVersion: SCHEMA_VERSION, recoveredAt: new Date().toISOString() }),
+      );
+      this.ready = Promise.resolve();
+    });
   }
 
   clear(): Promise<void> {
     return this.exclusive(async () => {
       const keys = (await this.storage.getAllKeys()).filter(
         (key) =>
-          key.startsWith(`${STORAGE_PREFIX}bootstrap`) ||
+          key === LEGACY_BOOTSTRAP_KEY ||
+          key.startsWith(`${STORAGE_PREFIX}snapshot:`) ||
+          key.startsWith(`${STORAGE_PREFIX}active-scope:`) ||
           key.startsWith(`${STORAGE_PREFIX}outbox:`),
       );
       if (keys.length) await this.storage.multiRemove(keys);
+      await this.storage.setItem(MANIFEST_KEY, JSON.stringify({ schemaVersion: SCHEMA_VERSION }));
+      this.ready = Promise.resolve();
     });
   }
 
@@ -78,9 +241,10 @@ export class SqliteMobileDataStore implements MobileDataStore {
     idempotencyKey: string,
   ): Promise<OfflineCommand> {
     return this.exclusive(async () => {
+      await this.ensureSchema();
       this.assertOfflineSale(snapshot, quote, input, idempotencyKey);
       const key = this.outboxKey(snapshot.scope);
-      const commands = await this.readCommands(key);
+      const commands = await this.readCommands(key, snapshot.scope);
       const existing = commands.find((command) => command.idempotencyKey === idempotencyKey);
       const payload = this.payload(quote, input, existing?.payload.snapshot.capturedAt);
       if (existing) {
@@ -110,14 +274,17 @@ export class SqliteMobileDataStore implements MobileDataStore {
       };
       await this.storage.multiSet([
         [sequenceKey, String(sequence)],
-        [key, JSON.stringify([...commands, command])],
+        [key, this.outboxValue(snapshot.scope, [...commands, command])],
       ]);
       return command;
     });
   }
 
   commands(scope: BootstrapSnapshot['scope']): Promise<OfflineCommand[]> {
-    return this.exclusive(() => this.readCommands(this.outboxKey(scope)));
+    return this.exclusive(async () => {
+      await this.ensureSchema();
+      return this.readCommands(this.outboxKey(scope), scope);
+    });
   }
 
   async pendingCount(scope: BootstrapSnapshot['scope']): Promise<number> {
@@ -127,11 +294,15 @@ export class SqliteMobileDataStore implements MobileDataStore {
 
   pendingCountAll(): Promise<number> {
     return this.exclusive(async () => {
+      await this.ensureSchema();
       const keys = (await this.storage.getAllKeys()).filter((key) =>
         key.startsWith(`${STORAGE_PREFIX}outbox:`),
       );
       let count = 0;
-      for (const key of keys) count += (await this.readCommands(key)).filter(this.pending).length;
+      for (const key of keys) {
+        const scope = this.scopeFromOutboxKey(key);
+        count += (await this.readCommands(key, scope)).filter(this.pending).length;
+      }
       return count;
     });
   }
@@ -141,10 +312,11 @@ export class SqliteMobileDataStore implements MobileDataStore {
     sender: (commands: OfflineCommand[]) => Promise<OfflineCommandBatchResponse>,
   ): Promise<OfflineFlushSummary> {
     return this.exclusive(async () => {
+      await this.ensureSchema();
       const summary: OfflineFlushSummary = { confirmed: 0, rejected: 0 };
       const key = this.outboxKey(scope);
       while (true) {
-        const commands = await this.readCommands(key);
+        const commands = await this.readCommands(key, scope);
         const batch = commands.filter(this.pending).sort(bySequence).slice(0, 20);
         if (!batch.length) return summary;
         const ids = new Set(batch.map(({ commandId }) => commandId));
@@ -158,7 +330,7 @@ export class SqliteMobileDataStore implements MobileDataStore {
               }
             : command,
         );
-        await this.writeCommands(key, sent);
+        await this.writeCommands(key, scope, sent);
         try {
           const response = await sender(batch);
           const results = new Map(
@@ -187,13 +359,14 @@ export class SqliteMobileDataStore implements MobileDataStore {
               error: result.error ?? null,
             };
           });
-          await this.writeCommands(key, settled);
+          await this.writeCommands(key, scope, settled);
           if (settled.some((command) => ids.has(command.commandId) && command.retryable)) {
             return summary;
           }
         } catch (error) {
           await this.writeCommands(
             key,
+            scope,
             sent.map((command) =>
               ids.has(command.commandId)
                 ? {
@@ -209,6 +382,100 @@ export class SqliteMobileDataStore implements MobileDataStore {
         }
       }
     });
+  }
+
+  private async ensureSchema(): Promise<void> {
+    this.ready ??= this.migrate();
+    try {
+      await this.ready;
+    } catch (error) {
+      this.ready = null;
+      throw error;
+    }
+  }
+
+  private async migrate(): Promise<void> {
+    const manifestValue = await this.storage.getItem(MANIFEST_KEY);
+    if (manifestValue) {
+      const manifest = this.parse<{ schemaVersion?: number }>(manifestValue, 'esquema');
+      if (manifest.schemaVersion === SCHEMA_VERSION) return;
+      if ((manifest.schemaVersion ?? 0) > SCHEMA_VERSION) {
+        throw new MobileStorageError(
+          'INCOMPATIBLE_SCHEMA',
+          'La base local fue creada por una versión más reciente de UInventario.',
+        );
+      }
+    }
+
+    const legacyValue = await this.storage.getItem(LEGACY_BOOTSTRAP_KEY);
+    const writes: [string, string][] = [
+      [MANIFEST_KEY, JSON.stringify({ schemaVersion: SCHEMA_VERSION })],
+    ];
+    if (legacyValue) {
+      const snapshot = this.parse<BootstrapSnapshot>(legacyValue, 'bootstrap anterior');
+      this.assertSnapshot(snapshot);
+      writes.push([this.snapshotKey(snapshot.scope), this.snapshotValue(snapshot)]);
+    }
+    await this.storage.multiSet(writes);
+    if (legacyValue) await this.storage.multiRemove([LEGACY_BOOTSTRAP_KEY]);
+  }
+
+  private async readSnapshotRecord(
+    scope: BootstrapSnapshot['scope'],
+  ): Promise<SnapshotRecord | null> {
+    const value = await this.storage.getItem(this.snapshotKey(scope));
+    if (!value) return null;
+    const record = this.parseSnapshotRecord(value);
+    if (record.scopeKey !== this.scopeKey(scope)) {
+      throw new MobileStorageError('CORRUPT', 'El bootstrap local está dañado.');
+    }
+    return record;
+  }
+
+  private writeSnapshot(snapshot: BootstrapSnapshot, session: StoredSession | null): Promise<void> {
+    const values: [string, string][] = [
+      [this.snapshotKey(snapshot.scope), this.snapshotValue(snapshot, session)],
+    ];
+    if (session) {
+      values.push([this.activeScopeKey(snapshot.scope.deviceId), this.scopeKey(snapshot.scope)]);
+    }
+    return this.storage.multiSet(values);
+  }
+
+  private snapshotValue(snapshot: BootstrapSnapshot, session: StoredSession | null = null): string {
+    return JSON.stringify({
+      schemaVersion: SCHEMA_VERSION,
+      scopeKey: this.scopeKey(snapshot.scope),
+      storedAt: new Date().toISOString(),
+      snapshot,
+      session,
+    } satisfies SnapshotRecord);
+  }
+
+  private parseSnapshotRecord(value: string): SnapshotRecord {
+    const record = this.parse<SnapshotRecord>(value, 'bootstrap');
+    if (
+      record.schemaVersion !== SCHEMA_VERSION ||
+      typeof record.scopeKey !== 'string' ||
+      typeof record.storedAt !== 'string' ||
+      !this.isSnapshot(record.snapshot) ||
+      this.scopeKey(record.snapshot.scope) !== record.scopeKey ||
+      (record.session !== null && record.session !== undefined && !this.isStoredSession(record.session))
+    ) {
+      throw new MobileStorageError('CORRUPT', 'El bootstrap local está dañado.');
+    }
+    return { ...record, session: record.session ?? null };
+  }
+
+  private isStoredSession(value: unknown): value is StoredSession {
+    if (!value || typeof value !== 'object') return false;
+    const session = value as Partial<StoredSession>;
+    return (
+      typeof session.expiresAt === 'string' &&
+      !!session.data &&
+      typeof session.data.user?.id === 'string' &&
+      typeof session.data.tenant?.id === 'string'
+    );
   }
 
   private payload(
@@ -283,6 +550,30 @@ export class SqliteMobileDataStore implements MobileDataStore {
     }
   }
 
+  private assertSnapshot(snapshot: BootstrapSnapshot): void {
+    if (!this.isSnapshot(snapshot)) {
+      throw new MobileStorageError('CORRUPT', 'El bootstrap no tiene un formato compatible.');
+    }
+    if (snapshot.entities.some(({ tenantId }) => tenantId !== snapshot.scope.tenantId)) {
+      throw new MobileStorageError('CORRUPT', 'El bootstrap contiene datos de otra empresa.');
+    }
+  }
+
+  private isSnapshot(value: unknown): value is BootstrapSnapshot {
+    if (!value || typeof value !== 'object') return false;
+    const snapshot = value as Partial<BootstrapSnapshot>;
+    return (
+      snapshot.protocolVersion === '1.0' &&
+      typeof snapshot.initialSyncCursor === 'string' &&
+      !!snapshot.scope &&
+      typeof snapshot.scope.tenantId === 'string' &&
+      typeof snapshot.scope.userId === 'string' &&
+      typeof snapshot.scope.deviceId === 'string' &&
+      !!snapshot.identity &&
+      Array.isArray(snapshot.entities)
+    );
+  }
+
   private pending(command: OfflineCommand): boolean {
     return (
       command.status === 'PENDING' ||
@@ -291,25 +582,103 @@ export class SqliteMobileDataStore implements MobileDataStore {
     );
   }
 
-  private async readCommands(key: string): Promise<OfflineCommand[]> {
+  private async readCommands(
+    key: string,
+    scope: BootstrapSnapshot['scope'],
+  ): Promise<OfflineCommand[]> {
     const value = await this.storage.getItem(key);
     if (!value) return [];
-    const parsed = JSON.parse(value) as OfflineCommand[];
-    return parsed.sort(bySequence);
+    const parsed = this.parse<OutboxRecord | OfflineCommand[]>(value, 'outbox');
+    if (Array.isArray(parsed)) {
+      if (!parsed.every((command) => this.isCommand(command, scope))) {
+        throw new MobileStorageError('CORRUPT', 'La cola offline está dañada.');
+      }
+      await this.writeCommands(key, scope, parsed);
+      return parsed.sort(bySequence);
+    }
+    if (
+      parsed.schemaVersion !== SCHEMA_VERSION ||
+      parsed.scopeKey !== this.scopeKey(scope) ||
+      !Array.isArray(parsed.commands) ||
+      !parsed.commands.every((command) => this.isCommand(command, scope))
+    ) {
+      throw new MobileStorageError('CORRUPT', 'La cola offline está dañada.');
+    }
+    return parsed.commands.sort(bySequence);
   }
 
-  private writeCommands(key: string, commands: OfflineCommand[]): Promise<void> {
-    return this.storage.setItem(key, JSON.stringify(commands));
+  private isCommand(value: unknown, scope: BootstrapSnapshot['scope']): value is OfflineCommand {
+    if (!value || typeof value !== 'object') return false;
+    const command = value as Partial<OfflineCommand>;
+    return (
+      command.protocolVersion === '1.0' &&
+      typeof command.commandId === 'string' &&
+      typeof command.sequence === 'number' &&
+      !!command.scope &&
+      this.scopeKey(command.scope) === this.scopeKey(scope)
+    );
+  }
+
+  private writeCommands(
+    key: string,
+    scope: BootstrapSnapshot['scope'],
+    commands: OfflineCommand[],
+  ): Promise<void> {
+    return this.storage.setItem(key, this.outboxValue(scope, commands));
+  }
+
+  private outboxValue(scope: BootstrapSnapshot['scope'], commands: OfflineCommand[]): string {
+    return JSON.stringify({
+      schemaVersion: SCHEMA_VERSION,
+      scopeKey: this.scopeKey(scope),
+      commands,
+    } satisfies OutboxRecord);
+  }
+
+  private parse<T>(value: string, label: string): T {
+    try {
+      return JSON.parse(value) as T;
+    } catch (cause) {
+      throw new MobileStorageError('CORRUPT', `El ${label} local está dañado.`, { cause });
+    }
+  }
+
+  private snapshotKey(scope: BootstrapSnapshot['scope']): string {
+    return `${STORAGE_PREFIX}snapshot:${this.scopeKey(scope)}`;
   }
 
   private outboxKey(scope: BootstrapSnapshot['scope']): string {
-    return `${STORAGE_PREFIX}outbox:${[
+    return `${STORAGE_PREFIX}outbox:${this.scopeKey(scope)}`;
+  }
+
+  private activeScopeKey(deviceId: string): string {
+    return `${STORAGE_PREFIX}active-scope:${deviceId}`;
+  }
+
+  private scopeKey(scope: BootstrapSnapshot['scope']): string {
+    return [
       scope.tenantId,
       scope.userId,
       scope.deviceId,
       scope.branchId ?? '-',
       scope.cashRegisterId ?? '-',
-    ].join(':')}`;
+    ].join(':');
+  }
+
+  private scopeFromOutboxKey(key: string): BootstrapSnapshot['scope'] {
+    const [tenantId, userId, deviceId, branchId, cashRegisterId] = key
+      .slice(`${STORAGE_PREFIX}outbox:`.length)
+      .split(':');
+    if (!tenantId || !userId || !deviceId || !branchId || !cashRegisterId) {
+      throw new MobileStorageError('CORRUPT', 'La cola offline tiene un alcance inválido.');
+    }
+    return {
+      tenantId,
+      userId,
+      deviceId,
+      branchId: branchId === '-' ? null : branchId,
+      cashRegisterId: cashRegisterId === '-' ? null : cashRegisterId,
+    };
   }
 
   private sequenceKey(scope: BootstrapSnapshot['scope']): string {
@@ -352,6 +721,17 @@ function money(value: string): bigint {
 
 function bySequence(left: OfflineCommand, right: OfflineCommand) {
   return left.sequence - right.sequence;
+}
+
+function byEntity(
+  left: BootstrapSnapshot['entities'][number],
+  right: BootstrapSnapshot['entities'][number],
+) {
+  return entityKey(left).localeCompare(entityKey(right));
+}
+
+function entityKey(entity: BootstrapSnapshot['entities'][number]): string {
+  return `${entity.kind}:${entity.id}`;
 }
 
 function serializableError(error: unknown): unknown {

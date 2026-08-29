@@ -1,11 +1,16 @@
 import {
   AuthenticatedSession,
+  BootstrapSnapshot,
   ProductDetailData,
   SessionContextInput,
 } from './contracts';
 import { ApiError, MobileApi } from './mobile-api';
 import { CredentialsStore } from './secure-credentials';
-import { MobileDataStore, OfflineFlushSummary } from '@/offline/mobile-data-store';
+import {
+  MobileDataStore,
+  MobileStorageError,
+  OfflineFlushSummary,
+} from '@/offline/mobile-data-store';
 import {
   CashSaleInput,
   OfflineCommand,
@@ -35,6 +40,13 @@ export class SessionManager {
       this.token = refreshed.auth.accessToken;
       return await this.loadSession(refreshed);
     } catch (error) {
+      if (error instanceof ApiError && error.code === 'NETWORK_ERROR') {
+        const local = await this.localData.latest(await this.credentials.deviceId());
+        if (local && this.offlineSessionIsValid(local)) {
+          this.token = token;
+          return local;
+        }
+      }
       if (this.requiresLocalReset(error)) {
         await this.clear();
         if (error instanceof ApiError && error.status === 401) return null;
@@ -151,18 +163,92 @@ export class SessionManager {
     data: AuthenticatedSession['data'];
     meta: { sessionExpiresAt: string };
   }): Promise<AuthenticatedSession> {
-    const bootstrap = await this.api.bootstrap(
-      this.requireToken(),
-      await this.credentials.deviceId(),
-    );
+    const deviceId = await this.credentials.deviceId();
+    const scope: BootstrapSnapshot['scope'] = {
+      tenantId: response.data.tenant.id,
+      userId: response.data.user.id,
+      deviceId,
+      branchId: response.data.context.branch?.id ?? null,
+      cashRegisterId: response.data.context.cashRegister?.id ?? null,
+    };
+    let bootstrap: BootstrapSnapshot;
+    try {
+      const stored = await this.localData.snapshot(scope);
+      bootstrap = stored
+        ? await this.syncStored(stored)
+        : await this.freshBootstrap(deviceId, scope);
+    } catch (error) {
+      if (error instanceof MobileStorageError && error.code === 'CORRUPT') {
+        await this.localData.recover();
+        bootstrap = await this.freshBootstrap(deviceId, scope);
+      } else if (error instanceof ApiError && [400, 410].includes(error.status)) {
+        bootstrap = await this.freshBootstrap(deviceId, scope);
+      } else {
+        throw error;
+      }
+    }
     if (
       bootstrap.scope.tenantId !== response.data.tenant.id ||
-      bootstrap.scope.userId !== response.data.user.id
+      bootstrap.scope.userId !== response.data.user.id ||
+      bootstrap.scope.deviceId !== deviceId
     ) {
       throw new ApiError(409, 'BOOTSTRAP_SCOPE_MISMATCH', 'El bootstrap no pertenece a la sesión.');
     }
-    await this.localData.replace(bootstrap);
+    await this.localData.replace(bootstrap, {
+      data: response.data,
+      expiresAt: response.meta.sessionExpiresAt,
+    });
     return { data: response.data, expiresAt: response.meta.sessionExpiresAt, bootstrap };
+  }
+
+  private async syncStored(stored: BootstrapSnapshot): Promise<BootstrapSnapshot> {
+    let snapshot = stored;
+    for (let page = 0; page < 100; page += 1) {
+      const response = await this.api.changes(
+        this.requireToken(),
+        snapshot.scope.deviceId,
+        snapshot.initialSyncCursor,
+      );
+      snapshot = await this.localData.applyChanges(snapshot.scope, response.data);
+      if (!response.data.hasMore) return snapshot;
+    }
+    throw new ApiError(502, 'INCOMPLETE_SYNC', 'No fue posible completar la sincronización.');
+  }
+
+  private async freshBootstrap(
+    deviceId: string,
+    expectedScope: BootstrapSnapshot['scope'],
+  ): Promise<BootstrapSnapshot> {
+    const bootstrap = await this.api.bootstrap(this.requireToken(), deviceId);
+    if (
+      bootstrap.scope.tenantId !== expectedScope.tenantId ||
+      bootstrap.scope.userId !== expectedScope.userId ||
+      bootstrap.scope.deviceId !== expectedScope.deviceId ||
+      bootstrap.scope.branchId !== expectedScope.branchId ||
+      bootstrap.scope.cashRegisterId !== expectedScope.cashRegisterId
+    ) {
+      throw new ApiError(409, 'BOOTSTRAP_SCOPE_MISMATCH', 'El bootstrap no pertenece a la sesión.');
+    }
+    return bootstrap;
+  }
+
+  private offlineSessionIsValid(session: AuthenticatedSession): boolean {
+    const now = Date.now();
+    const generatedAt = Date.parse(session.bootstrap.generatedAt);
+    const expiresAt = Math.min(
+      Date.parse(session.expiresAt),
+      Date.parse(session.bootstrap.sessionExpiresAt),
+    );
+    const ageSeconds = (now - generatedAt) / 1000;
+    return (
+      Number.isFinite(ageSeconds) &&
+      ageSeconds >= -session.bootstrap.freshnessPolicy.maxClockSkewSeconds &&
+      ageSeconds <= session.bootstrap.freshnessPolicy.permissionsTtlSeconds &&
+      Number.isFinite(expiresAt) &&
+      now < expiresAt &&
+      session.data.tenant.id === session.bootstrap.scope.tenantId &&
+      session.data.user.id === session.bootstrap.scope.userId
+    );
   }
 
   private requireToken(): string {
