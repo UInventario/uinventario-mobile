@@ -1,4 +1,9 @@
-import { AuthenticatedSession, BootstrapSnapshot, SessionContextInput } from './contracts';
+import {
+  AuthenticatedSession,
+  BootstrapSnapshot,
+  ProductDetailData,
+  SessionContextInput,
+} from './contracts';
 import { ApiError, MobileApi } from './mobile-api';
 import { CredentialsStore } from './secure-credentials';
 
@@ -90,6 +95,15 @@ export class SessionManager {
       if (token) await this.api.logout(token);
     } finally {
       await this.clear();
+    }
+  }
+
+  async product(id: string): Promise<ProductDetailData> {
+    try {
+      return (await this.api.product(this.requireToken(), id)).data;
+    } catch (error) {
+      await this.clearIfSecurityFailure(error);
+      throw error;
     }
   }
 

@@ -27,6 +27,11 @@ export default function AppTabs() {
           renderingMode="template"
         />
       </NativeTabs.Trigger>
+
+      <NativeTabs.Trigger name="catalog">
+        <NativeTabs.Trigger.Label>Catálogo</NativeTabs.Trigger.Label>
+        <NativeTabs.Trigger.Icon sf="barcode.viewfinder" md="qr_code_scanner" />
+      </NativeTabs.Trigger>
     </NativeTabs>
   );
 }

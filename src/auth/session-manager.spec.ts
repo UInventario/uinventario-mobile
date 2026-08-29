@@ -99,6 +99,7 @@ function setup(storedToken: string | null = null) {
     changeContext: jest.fn().mockResolvedValue(mobileSession),
     logout: jest.fn().mockResolvedValue(undefined),
     bootstrap: jest.fn().mockResolvedValue(bootstrap),
+    product: jest.fn().mockResolvedValue({ data: {}, meta: { apiVersion: '1' } }),
   };
   const credentials: CredentialsStore = {
     readToken: jest.fn().mockResolvedValue(storedToken),
