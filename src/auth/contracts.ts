@@ -34,6 +34,34 @@ export interface BootstrapEntity {
   branchId?: string;
   warehouseId?: string;
   code?: string;
+  sku?: string;
+  barcode?: string | null;
+  price?: string;
+  categoryId?: string | null;
+  brandId?: string | null;
+  productId?: string;
+  locationId?: string;
+  availableQuantity?: string;
+}
+
+export interface ProductDetailData {
+  id: string;
+  name: string;
+  sku: string;
+  barcode: string | null;
+  trackLots: boolean;
+  trackSerials: boolean;
+  category: { id: string; name: string } | null;
+  brand: { id: string; name: string } | null;
+  cost: string;
+  price: string;
+  active: boolean;
+  version: number;
+}
+
+export interface ProductDetailResponse {
+  data: ProductDetailData;
+  meta: { apiVersion: '1' };
 }
 
 export interface OfflineBootstrapResponse {

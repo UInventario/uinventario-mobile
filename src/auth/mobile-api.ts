@@ -2,6 +2,7 @@ import {
   BootstrapSnapshot,
   MobileSessionResponse,
   OfflineBootstrapResponse,
+  ProductDetailResponse,
   SessionContextInput,
   SessionResponse,
 } from './contracts';
@@ -23,6 +24,7 @@ export interface MobileApi {
   changeContext(token: string, input: SessionContextInput): Promise<SessionResponse>;
   logout(token: string): Promise<void>;
   bootstrap(token: string, deviceId: string): Promise<BootstrapSnapshot>;
+  product(token: string, id: string): Promise<ProductDetailResponse>;
 }
 
 export class HttpMobileApi implements MobileApi {
@@ -94,6 +96,10 @@ export class HttpMobileApi implements MobileApi {
     }
 
     throw new ApiError(502, 'INCOMPLETE_BOOTSTRAP', 'No fue posible completar el bootstrap.');
+  }
+
+  product(token: string, id: string) {
+    return this.request<ProductDetailResponse>(`/products/${encodeURIComponent(id)}`, { token });
   }
 
   private async request<T>(

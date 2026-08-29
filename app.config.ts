@@ -54,7 +54,17 @@ export default ({ config }: ConfigContext): ExpoConfig => {
       output: 'static',
       favicon: './assets/images/favicon.png',
     },
-    plugins: ['expo-router', 'expo-secure-store'],
+    plugins: [
+      'expo-router',
+      'expo-secure-store',
+      [
+        'expo-camera',
+        {
+          cameraPermission: 'UInventario usa la cámara para escanear códigos de productos.',
+          barcodeScannerEnabled: true,
+        },
+      ],
+    ],
     experiments: {
       typedRoutes: true,
       reactCompiler: true,

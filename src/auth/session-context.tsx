@@ -2,7 +2,7 @@ import { PropsWithChildren, createContext, useContext, useEffect, useMemo, useSt
 
 import { appEnvironment } from '@/config/environment';
 
-import { AuthenticatedSession, SessionContextInput } from './contracts';
+import { AuthenticatedSession, ProductDetailData, SessionContextInput } from './contracts';
 import { ApiError, HttpMobileApi } from './mobile-api';
 import { SecureCredentialsStore } from './secure-credentials';
 import { MemoryLocalDataStore, SessionManager } from './session-manager';
@@ -18,6 +18,7 @@ interface SessionContextValue {
   refresh(): Promise<void>;
   changeContext(input: SessionContextInput): Promise<void>;
   logout(): Promise<void>;
+  product(id: string): Promise<ProductDetailData>;
   clearError(): void;
 }
 
@@ -88,6 +89,26 @@ export function SessionProvider({ children }: PropsWithChildren) {
     }
   }
 
+  async function product(id: string): Promise<ProductDetailData> {
+    setBusy(true);
+    setError(null);
+    try {
+      return await manager.product(id);
+    } catch (cause) {
+      setError(messageFor(cause));
+      if (
+        cause instanceof ApiError &&
+        (cause.status === 401 || cause.code === 'BOOTSTRAP_SCOPE_MISMATCH')
+      ) {
+        setSession(null);
+        setStatus('anonymous');
+      }
+      throw cause;
+    } finally {
+      setBusy(false);
+    }
+  }
+
   async function run(action: () => Promise<void>) {
     setBusy(true);
     setError(null);
@@ -119,6 +140,7 @@ export function SessionProvider({ children }: PropsWithChildren) {
         refresh,
         changeContext,
         logout,
+        product,
         clearError: () => setError(null),
       }}>
       {children}
