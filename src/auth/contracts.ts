@@ -42,6 +42,49 @@ export interface BootstrapEntity {
   productId?: string;
   locationId?: string;
   availableQuantity?: string;
+  currency?: string;
+  customerId?: string | null;
+  channel?: 'POS' | 'WEB' | 'MOBILE' | 'DESKTOP' | null;
+  priority?: number;
+  validFrom?: string;
+  validTo?: string | null;
+  items?: { productId: string; price: string }[];
+}
+
+export interface OfflineFreshnessPolicy {
+  version: 1;
+  maxClockSkewSeconds: number;
+  catalogTtlSeconds: number;
+  permissionsTtlSeconds: number;
+  actionTtlSeconds: {
+    CASH_SALE: number;
+    INVENTORY_COUNT: number;
+    INVENTORY_MOVEMENT: number;
+  };
+}
+
+export interface OfflineValuationPolicy {
+  method: 'MOVING_AVERAGE' | 'FIFO' | 'SPECIFIC_LOT';
+  version: number;
+  effectiveAt: string;
+  migrationRule: 'INITIAL_DEFAULT' | 'FORWARD_ONLY_CUTOVER';
+}
+
+export interface OfflinePosPolicy {
+  kind: 'POS_POLICY';
+  id: string;
+  tenantId: string;
+  version: number;
+  updatedAt: string;
+  branchId: string;
+  warehouseId: string;
+  cashRegisterId: string;
+  shiftId: string;
+  shiftOpenedAt: string;
+  currency: string;
+  taxRate: string;
+  paymentMethods: ['CASH'];
+  negativeStock: 'DENY';
 }
 
 export interface ProductDetailData {
@@ -69,6 +112,9 @@ export interface OfflineBootstrapResponse {
     protocolVersion: '1.0';
     generatedAt: string;
     sessionExpiresAt: string;
+    freshnessPolicy: OfflineFreshnessPolicy;
+    valuationPolicy: OfflineValuationPolicy;
+    posPolicy: OfflinePosPolicy | null;
     scope: {
       tenantId: string;
       userId: string;
@@ -93,7 +139,11 @@ export interface OfflineBootstrapResponse {
 export interface BootstrapSnapshot {
   protocolVersion: '1.0';
   generatedAt: string;
+  sessionExpiresAt: string;
   initialSyncCursor: string;
+  freshnessPolicy: OfflineFreshnessPolicy;
+  valuationPolicy: OfflineValuationPolicy;
+  posPolicy: OfflinePosPolicy | null;
   scope: OfflineBootstrapResponse['data']['scope'];
   identity: OfflineBootstrapResponse['data']['identity'];
   entities: BootstrapEntity[];

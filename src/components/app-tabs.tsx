@@ -32,6 +32,11 @@ export default function AppTabs() {
         <NativeTabs.Trigger.Label>Catálogo</NativeTabs.Trigger.Label>
         <NativeTabs.Trigger.Icon sf="barcode.viewfinder" md="qr_code_scanner" />
       </NativeTabs.Trigger>
+
+      <NativeTabs.Trigger name="pos">
+        <NativeTabs.Trigger.Label>Venta</NativeTabs.Trigger.Label>
+        <NativeTabs.Trigger.Icon sf="cart" md="point_of_sale" />
+      </NativeTabs.Trigger>
     </NativeTabs>
   );
 }

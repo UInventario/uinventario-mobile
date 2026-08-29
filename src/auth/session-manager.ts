@@ -1,28 +1,20 @@
 import {
   AuthenticatedSession,
-  BootstrapSnapshot,
   ProductDetailData,
   SessionContextInput,
 } from './contracts';
 import { ApiError, MobileApi } from './mobile-api';
 import { CredentialsStore } from './secure-credentials';
-
-export interface LocalDataStore {
-  replace(snapshot: BootstrapSnapshot): Promise<void>;
-  clear(): Promise<void>;
-}
-
-export class MemoryLocalDataStore implements LocalDataStore {
-  private snapshot: BootstrapSnapshot | null = null;
-
-  async replace(snapshot: BootstrapSnapshot): Promise<void> {
-    this.snapshot = snapshot;
-  }
-
-  async clear(): Promise<void> {
-    this.snapshot = null;
-  }
-}
+import { MobileDataStore, OfflineFlushSummary } from '@/offline/mobile-data-store';
+import {
+  CashSaleInput,
+  OfflineCommand,
+  PaymentMethod,
+  PosCartLineInput,
+  PosQuote,
+  SaleData,
+  SaleInput,
+} from '@/pos/contracts';
 
 export class SessionManager {
   private token: string | null = null;
@@ -30,7 +22,7 @@ export class SessionManager {
   constructor(
     private readonly api: MobileApi,
     private readonly credentials: CredentialsStore,
-    private readonly localData: LocalDataStore,
+    private readonly localData: MobileDataStore,
   ) {}
 
   async restore(): Promise<AuthenticatedSession | null> {
@@ -79,6 +71,13 @@ export class SessionManager {
   }
 
   async changeContext(input: SessionContextInput): Promise<AuthenticatedSession> {
+    if ((await this.localData.pendingCountAll()) > 0) {
+      throw new ApiError(
+        409,
+        'OFFLINE_COMMANDS_PENDING',
+        'Sincroniza las ventas pendientes antes de cambiar de sucursal o caja.',
+      );
+    }
     const token = this.requireToken();
     try {
       const response = await this.api.changeContext(token, input);
@@ -99,12 +98,48 @@ export class SessionManager {
   }
 
   async product(id: string): Promise<ProductDetailData> {
-    try {
-      return (await this.api.product(this.requireToken(), id)).data;
-    } catch (error) {
-      await this.clearIfSecurityFailure(error);
-      throw error;
-    }
+    return this.apiRequest(async (token) => (await this.api.product(token, id)).data);
+  }
+
+  quote(lines: PosCartLineInput[]): Promise<PosQuote> {
+    return this.apiRequest(async (token) => (await this.api.quote(token, lines)).data);
+  }
+
+  paymentOptions(): Promise<PaymentMethod[]> {
+    return this.apiRequest(async (token) => (await this.api.paymentOptions(token)).data.methods);
+  }
+
+  cashSale(input: CashSaleInput, idempotencyKey: string): Promise<SaleData> {
+    return this.apiRequest(async (token) =>
+      (await this.api.cashSale(token, input, idempotencyKey)).data,
+    );
+  }
+
+  sale(input: SaleInput, idempotencyKey: string): Promise<SaleData> {
+    return this.apiRequest(async (token) =>
+      (await this.api.sale(token, input, idempotencyKey)).data,
+    );
+  }
+
+  queueCashSale(
+    session: AuthenticatedSession,
+    quote: PosQuote,
+    input: CashSaleInput,
+    idempotencyKey: string,
+  ): Promise<OfflineCommand> {
+    return this.localData.queueCashSale(session.bootstrap, quote, input, idempotencyKey);
+  }
+
+  offlineCommands(session: AuthenticatedSession): Promise<OfflineCommand[]> {
+    return this.localData.commands(session.bootstrap.scope);
+  }
+
+  flushOffline(session: AuthenticatedSession): Promise<OfflineFlushSummary> {
+    return this.apiRequest((token) =>
+      this.localData.flush(session.bootstrap.scope, (commands) =>
+        this.api.commands(token, commands),
+      ),
+    );
   }
 
   async clear(): Promise<void> {
@@ -144,5 +179,14 @@ export class SessionManager {
       error instanceof ApiError &&
       (error.status === 401 || error.code === 'BOOTSTRAP_SCOPE_MISMATCH')
     );
+  }
+
+  private async apiRequest<T>(request: (token: string) => Promise<T>): Promise<T> {
+    try {
+      return await request(this.requireToken());
+    } catch (error) {
+      await this.clearIfSecurityFailure(error);
+      throw error;
+    }
   }
 }

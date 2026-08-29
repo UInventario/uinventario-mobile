@@ -1,7 +1,8 @@
 import { BootstrapSnapshot, MobileSessionResponse, SessionResponse } from './contracts';
 import { ApiError, MobileApi } from './mobile-api';
 import { CredentialsStore } from './secure-credentials';
-import { LocalDataStore, SessionManager } from './session-manager';
+import { SessionManager } from './session-manager';
+import { MobileDataStore } from '@/offline/mobile-data-store';
 
 const sessionData: SessionResponse['data'] = {
   user: {
@@ -28,7 +29,22 @@ const mobileSession: MobileSessionResponse = {
 const bootstrap: BootstrapSnapshot = {
   protocolVersion: '1.0',
   generatedAt: '2026-08-28T00:00:00.000Z',
+  sessionExpiresAt: '2026-08-29T00:00:00.000Z',
   initialSyncCursor: 'cursor',
+  freshnessPolicy: {
+    version: 1,
+    maxClockSkewSeconds: 300,
+    catalogTtlSeconds: 86400,
+    permissionsTtlSeconds: 3600,
+    actionTtlSeconds: { CASH_SALE: 900, INVENTORY_COUNT: 14400, INVENTORY_MOVEMENT: 3600 },
+  },
+  valuationPolicy: {
+    method: 'MOVING_AVERAGE',
+    version: 1,
+    effectiveAt: '2026-08-28T00:00:00.000Z',
+    migrationRule: 'INITIAL_DEFAULT',
+  },
+  posPolicy: null,
   scope: {
     tenantId: 'tenant-1',
     userId: 'user-1',
@@ -89,6 +105,17 @@ describe('SessionManager', () => {
     expect(localData.clear).toHaveBeenCalledTimes(1);
     expect(localData.replace).not.toHaveBeenCalled();
   });
+
+  it('blocks a cash-register context change while an offline sale is pending', async () => {
+    const { manager, api, localData } = setup('stored-token');
+    jest.mocked(localData.pendingCountAll).mockResolvedValueOnce(1);
+
+    await expect(
+      manager.changeContext({ branchId: 'branch-2', warehouseId: 'warehouse-2' }),
+    ).rejects.toMatchObject({ code: 'OFFLINE_COMMANDS_PENDING' });
+
+    expect(api.changeContext).not.toHaveBeenCalled();
+  });
 });
 
 function setup(storedToken: string | null = null) {
@@ -100,6 +127,11 @@ function setup(storedToken: string | null = null) {
     logout: jest.fn().mockResolvedValue(undefined),
     bootstrap: jest.fn().mockResolvedValue(bootstrap),
     product: jest.fn().mockResolvedValue({ data: {}, meta: { apiVersion: '1' } }),
+    quote: jest.fn(),
+    paymentOptions: jest.fn(),
+    cashSale: jest.fn(),
+    sale: jest.fn(),
+    commands: jest.fn(),
   };
   const credentials: CredentialsStore = {
     readToken: jest.fn().mockResolvedValue(storedToken),
@@ -107,9 +139,14 @@ function setup(storedToken: string | null = null) {
     clearToken: jest.fn().mockResolvedValue(undefined),
     deviceId: jest.fn().mockResolvedValue('device-1'),
   };
-  const localData: LocalDataStore = {
+  const localData: MobileDataStore = {
     replace: jest.fn().mockResolvedValue(undefined),
     clear: jest.fn().mockResolvedValue(undefined),
+    queueCashSale: jest.fn(),
+    commands: jest.fn().mockResolvedValue([]),
+    pendingCount: jest.fn().mockResolvedValue(0),
+    pendingCountAll: jest.fn().mockResolvedValue(0),
+    flush: jest.fn(),
   };
   return {
     manager: new SessionManager(api, credentials, localData),
