@@ -127,6 +127,74 @@ describe('persistent mobile outbox', () => {
     expect(await store.pendingCountAll()).toBe(2);
   });
 
+  it('queues a count with the server bootstrap stock and the next causal sequence', async () => {
+    const store = testStore();
+    const snapshot = countSnapshot();
+    await store.queueCashSale(
+      snapshot,
+      posQuote(),
+      { lines: [{ productId: 'product-1', quantity: '1' }], cashReceived: '120.00' },
+      'mobile-sale-before-count',
+    );
+
+    const count = await store.queueInventoryCount(
+      snapshot,
+      {
+        productId: 'product-1',
+        locationId: 'location-1',
+        countedQuantity: '3.000',
+        reason: 'Conteo móvil',
+        reference: 'CNT-1',
+      },
+      'mobile-count-stable',
+    );
+
+    expect(count).toMatchObject({
+      kind: 'INVENTORY_COUNT',
+      sequence: 2,
+      payload: {
+        productId: 'product-1',
+        locationId: 'location-1',
+        snapshotQuantity: '2.000',
+        countedQuantity: '3.000',
+        reason: 'Conteo móvil',
+        reference: 'CNT-1',
+      },
+    });
+    await expect(
+      store.queueInventoryCount(
+        snapshot,
+        {
+          productId: 'product-1',
+          locationId: 'location-1',
+          countedQuantity: '3.000',
+          reason: 'Conteo móvil',
+          reference: 'CNT-1',
+        },
+        'mobile-count-stable',
+      ),
+    ).resolves.toMatchObject({ commandId: count.commandId, sequence: 2 });
+  });
+
+  it('rejects counts when the server-defined offline permission expired', async () => {
+    const snapshot = countSnapshot(Date.now() - 2_000);
+    snapshot.freshnessPolicy.actionTtlSeconds.INVENTORY_COUNT = 1;
+
+    await expect(
+      testStore().queueInventoryCount(
+        snapshot,
+        {
+          productId: 'product-1',
+          locationId: 'location-1',
+          countedQuantity: '3.000',
+          reason: 'Conteo móvil',
+          reference: 'CNT-2',
+        },
+        'mobile-count-expired',
+      ),
+    ).rejects.toThrow('autorización offline venció');
+  });
+
   it('migrates the legacy bootstrap and restores it after a forced restart', async () => {
     const storage = new MemoryKeyValueStore();
     const snapshot = posSnapshot();
@@ -298,4 +366,18 @@ function testStore() {
     new MemoryKeyValueStore(),
     () => '10000000-0000-4000-8000-000000000099',
   );
+}
+
+function countSnapshot(now = Date.now()) {
+  const snapshot = posSnapshot(now);
+  return {
+    ...snapshot,
+    identity: {
+      ...snapshot.identity,
+      user: {
+        ...snapshot.identity.user,
+        permissions: [...snapshot.identity.user.permissions, 'INVENTORY_COUNT'],
+      },
+    },
+  };
 }

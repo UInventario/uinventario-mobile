@@ -93,6 +93,45 @@ describe('mobile POS API contract', () => {
     );
     expect((init.headers as Headers).get('Authorization')).toBe('Bearer token-1');
   });
+
+  it('receives a transfer through its idempotent lifecycle endpoint', async () => {
+    const fetchMock = jest.fn().mockResolvedValue(ok({ data: {} }));
+    globalThis.fetch = fetchMock;
+    const api = new HttpMobileApi('https://api.example.test/api/v1');
+    const input = {
+      lines: [
+        { transferLineId: 'line-1', receivedQuantity: '2.000', discrepancyQuantity: '0.000' },
+      ],
+    };
+
+    await api.receiveInventoryTransfer('token-1', 'transfer-1', input, 'mobile-transfer-key');
+
+    const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+    expect(url).toBe(
+      'https://api.example.test/api/v1/inventory/transfers/transfer-1/receipts',
+    );
+    expect((init.headers as Headers).get('Idempotency-Key')).toBe('mobile-transfer-key');
+    expect(JSON.parse(String(init.body))).toEqual(input);
+  });
+
+  it('sends purchase receipt version and idempotency to the order endpoint', async () => {
+    const fetchMock = jest.fn().mockResolvedValue(ok({ data: {} }));
+    globalThis.fetch = fetchMock;
+    const api = new HttpMobileApi('https://api.example.test/api/v1');
+    const input = {
+      version: 3,
+      locationId: 'location-1',
+      documentReference: 'REM-9',
+      lines: [{ purchaseOrderLineId: 'line-1', receivedQuantity: '1.000' }],
+    };
+
+    await api.receivePurchaseOrder('token-1', 'order-1', input, 'mobile-receipt-key');
+
+    const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+    expect(url).toBe('https://api.example.test/api/v1/purchase-orders/order-1/receipts');
+    expect((init.headers as Headers).get('Idempotency-Key')).toBe('mobile-receipt-key');
+    expect(JSON.parse(String(init.body))).toEqual(input);
+  });
 });
 
 function ok(body: unknown): Response {

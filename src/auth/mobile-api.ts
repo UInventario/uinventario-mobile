@@ -17,6 +17,15 @@ import {
   SaleInput,
   SaleResponse,
 } from '@/pos/contracts';
+import {
+  CreateInventoryTransferInput,
+  InventoryTransferListResponse,
+  InventoryTransferResponse,
+  PurchaseOrderListResponse,
+  PurchaseOrderResponse,
+  ReceiveInventoryTransferInput,
+  ReceivePurchaseOrderInput,
+} from '@/inventory/contracts';
 
 export class ApiError extends Error {
   constructor(
@@ -46,6 +55,30 @@ export interface MobileApi {
   ): Promise<SaleResponse>;
   sale(token: string, input: SaleInput, idempotencyKey: string): Promise<SaleResponse>;
   commands(token: string, commands: OfflineCommand[]): Promise<OfflineCommandBatchResponse>;
+  inventoryTransfers(token: string): Promise<InventoryTransferListResponse>;
+  createInventoryTransfer(
+    token: string,
+    input: CreateInventoryTransferInput,
+    idempotencyKey: string,
+  ): Promise<InventoryTransferResponse>;
+  dispatchInventoryTransfer(
+    token: string,
+    transferId: string,
+    idempotencyKey: string,
+  ): Promise<InventoryTransferResponse>;
+  receiveInventoryTransfer(
+    token: string,
+    transferId: string,
+    input: ReceiveInventoryTransferInput,
+    idempotencyKey: string,
+  ): Promise<InventoryTransferResponse>;
+  purchaseOrders(token: string, query?: string): Promise<PurchaseOrderListResponse>;
+  receivePurchaseOrder(
+    token: string,
+    orderId: string,
+    input: ReceivePurchaseOrderInput,
+    idempotencyKey: string,
+  ): Promise<PurchaseOrderResponse>;
 }
 
 export class HttpMobileApi implements MobileApi {
@@ -173,6 +206,76 @@ export class HttpMobileApi implements MobileApi {
       token,
       body: JSON.stringify({ commands: commands.map(commandEnvelope) }),
     });
+  }
+
+  inventoryTransfers(token: string) {
+    return this.request<InventoryTransferListResponse>('/inventory/transfers', { token });
+  }
+
+  createInventoryTransfer(
+    token: string,
+    input: CreateInventoryTransferInput,
+    idempotencyKey: string,
+  ) {
+    return this.request<InventoryTransferResponse>('/inventory/transfers', {
+      method: 'POST',
+      token,
+      headers: { 'Idempotency-Key': idempotencyKey },
+      body: JSON.stringify(input),
+    });
+  }
+
+  dispatchInventoryTransfer(token: string, transferId: string, idempotencyKey: string) {
+    return this.request<InventoryTransferResponse>(
+      `/inventory/transfers/${encodeURIComponent(transferId)}/dispatch`,
+      {
+        method: 'POST',
+        token,
+        headers: { 'Idempotency-Key': idempotencyKey },
+      },
+    );
+  }
+
+  receiveInventoryTransfer(
+    token: string,
+    transferId: string,
+    input: ReceiveInventoryTransferInput,
+    idempotencyKey: string,
+  ) {
+    return this.request<InventoryTransferResponse>(
+      `/inventory/transfers/${encodeURIComponent(transferId)}/receipts`,
+      {
+        method: 'POST',
+        token,
+        headers: { 'Idempotency-Key': idempotencyKey },
+        body: JSON.stringify(input),
+      },
+    );
+  }
+
+  purchaseOrders(token: string, query = '') {
+    const parameters = new URLSearchParams({ page: '1', pageSize: '100' });
+    if (query.trim()) parameters.set('q', query.trim());
+    return this.request<PurchaseOrderListResponse>(`/purchase-orders?${parameters.toString()}`, {
+      token,
+    });
+  }
+
+  receivePurchaseOrder(
+    token: string,
+    orderId: string,
+    input: ReceivePurchaseOrderInput,
+    idempotencyKey: string,
+  ) {
+    return this.request<PurchaseOrderResponse>(
+      `/purchase-orders/${encodeURIComponent(orderId)}/receipts`,
+      {
+        method: 'POST',
+        token,
+        headers: { 'Idempotency-Key': idempotencyKey },
+        body: JSON.stringify(input),
+      },
+    );
   }
 
   private async request<T>(

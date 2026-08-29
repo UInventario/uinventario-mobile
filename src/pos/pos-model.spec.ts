@@ -32,6 +32,27 @@ describe('offline mobile POS quote', () => {
     ).toThrow('Stock offline insuficiente');
   });
 
+  it('does not subtract an inventory count from sale availability', () => {
+    const now = Date.parse('2026-08-29T08:00:00.000Z');
+    const snapshot = posSnapshot(now);
+    const count = {
+      kind: 'INVENTORY_COUNT',
+      status: 'PENDING',
+      retryable: true,
+      payload: {
+        productId: 'product-1',
+        locationId: 'location-1',
+        snapshotQuantity: '2.000',
+        countedQuantity: '0.000',
+      },
+    } as OfflineCommand;
+
+    expect(
+      offlineQuote(snapshot, [{ productId: 'product-1', quantity: '2' }], [count], now).lines[0]
+        .availableQuantity,
+    ).toBe('2.000');
+  });
+
   it('rejects an offline sale after the server-defined authorization TTL', () => {
     const now = Date.parse('2026-08-29T08:00:00.000Z');
     const snapshot = posSnapshot(now);

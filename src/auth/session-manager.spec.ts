@@ -206,6 +206,12 @@ function setup(storedToken: string | null = null) {
     cashSale: jest.fn(),
     sale: jest.fn(),
     commands: jest.fn(),
+    inventoryTransfers: jest.fn(),
+    createInventoryTransfer: jest.fn(),
+    dispatchInventoryTransfer: jest.fn(),
+    receiveInventoryTransfer: jest.fn(),
+    purchaseOrders: jest.fn(),
+    receivePurchaseOrder: jest.fn(),
   };
   const credentials: CredentialsStore = {
     readToken: jest.fn().mockResolvedValue(storedToken),
@@ -221,6 +227,7 @@ function setup(storedToken: string | null = null) {
     recover: jest.fn().mockResolvedValue(undefined),
     clear: jest.fn().mockResolvedValue(undefined),
     queueCashSale: jest.fn(),
+    queueInventoryCount: jest.fn(),
     commands: jest.fn().mockResolvedValue([]),
     pendingCount: jest.fn().mockResolvedValue(0),
     pendingCountAll: jest.fn().mockResolvedValue(0),

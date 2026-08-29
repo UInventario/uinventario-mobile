@@ -14,6 +14,7 @@ import {
   OfflineCommandBatchResponse,
   PosQuote,
 } from '@/pos/contracts';
+import { InventoryCountInput } from '@/inventory/contracts';
 
 const STORAGE_PREFIX = 'uinventario-mobile:';
 const SCHEMA_VERSION = 2;
@@ -77,6 +78,11 @@ export interface MobileDataStore {
     snapshot: BootstrapSnapshot,
     quote: PosQuote,
     input: CashSaleInput,
+    idempotencyKey: string,
+  ): Promise<OfflineCommand>;
+  queueInventoryCount(
+    snapshot: BootstrapSnapshot,
+    input: InventoryCountInput,
     idempotencyKey: string,
   ): Promise<OfflineCommand>;
   commands(scope: BootstrapSnapshot['scope']): Promise<OfflineCommand[]>;
@@ -246,9 +252,16 @@ export class SqliteMobileDataStore implements MobileDataStore {
       const key = this.outboxKey(snapshot.scope);
       const commands = await this.readCommands(key, snapshot.scope);
       const existing = commands.find((command) => command.idempotencyKey === idempotencyKey);
-      const payload = this.payload(quote, input, existing?.payload.snapshot.capturedAt);
+      const payload = this.payload(
+        quote,
+        input,
+        existing?.kind === 'CASH_SALE' ? existing.payload.snapshot.capturedAt : undefined,
+      );
       if (existing) {
-        if (JSON.stringify(existing.payload) !== JSON.stringify(payload)) {
+        if (
+          existing.kind !== 'CASH_SALE' ||
+          JSON.stringify(existing.payload) !== JSON.stringify(payload)
+        ) {
           throw new Error('La clave idempotente ya pertenece a otra venta local.');
         }
         return existing;
@@ -265,6 +278,79 @@ export class SqliteMobileDataStore implements MobileDataStore {
         valuationMethod: snapshot.valuationPolicy.method,
         valuationPolicyVersion: snapshot.valuationPolicy.version,
         kind: 'CASH_SALE',
+        payload,
+        status: 'PENDING',
+        attempts: 0,
+        retryable: true,
+        result: null,
+        error: null,
+      };
+      await this.storage.multiSet([
+        [sequenceKey, String(sequence)],
+        [key, this.outboxValue(snapshot.scope, [...commands, command])],
+      ]);
+      return command;
+    });
+  }
+
+  queueInventoryCount(
+    snapshot: BootstrapSnapshot,
+    input: InventoryCountInput,
+    idempotencyKey: string,
+  ): Promise<OfflineCommand> {
+    return this.exclusive(async () => {
+      await this.ensureSchema();
+      this.assertIdempotencyKey(idempotencyKey);
+      this.assertOfflineAuthorization(snapshot, 'INVENTORY_COUNT', 'INVENTORY_COUNT');
+      if (!/^(0|[1-9]\d{0,11})(\.\d{1,3})?$/.test(input.countedQuantity)) {
+        throw new Error('La cantidad contada no es válida.');
+      }
+      if (input.reason.trim().length < 2 || input.reference.trim().length < 2) {
+        throw new Error('Indica motivo y referencia del conteo.');
+      }
+      const product = snapshot.entities.find(
+        (entity) => entity.kind === 'PRODUCT' && entity.id === input.productId && entity.active !== false,
+      );
+      const location = snapshot.entities.find(
+        (entity) => entity.kind === 'LOCATION' && entity.id === input.locationId && entity.active !== false,
+      );
+      if (!product || !location) throw new Error('Producto o ubicación fuera del alcance offline.');
+      const availability = snapshot.entities.find(
+        (entity) =>
+          entity.kind === 'INVENTORY_AVAILABILITY' &&
+          entity.productId === input.productId &&
+          entity.locationId === input.locationId,
+      );
+      const payload = {
+        productId: input.productId,
+        locationId: input.locationId,
+        countedQuantity: input.countedQuantity,
+        snapshotQuantity: availability?.availableQuantity ?? '0.000',
+        reason: input.reason.trim(),
+        reference: input.reference.trim(),
+        capturedAt: new Date().toISOString(),
+      };
+      const key = this.outboxKey(snapshot.scope);
+      const commands = await this.readCommands(key, snapshot.scope);
+      const existing = commands.find((command) => command.idempotencyKey === idempotencyKey);
+      if (existing) {
+        if (existing.kind !== 'INVENTORY_COUNT' || !sameCount(existing.payload, payload)) {
+          throw new Error('La clave idempotente ya pertenece a otra operación local.');
+        }
+        return existing;
+      }
+      const sequenceKey = this.sequenceKey(snapshot.scope);
+      const sequence = Number((await this.storage.getItem(sequenceKey)) ?? '0') + 1;
+      const command: OfflineCommand = {
+        protocolVersion: '1.0',
+        commandId: this.createId(),
+        idempotencyKey,
+        scope: snapshot.scope,
+        sequence,
+        createdAt: new Date().toISOString(),
+        valuationMethod: snapshot.valuationPolicy.method,
+        valuationPolicyVersion: snapshot.valuationPolicy.version,
+        kind: 'INVENTORY_COUNT',
         payload,
         status: 'PENDING',
         attempts: 0,
@@ -516,9 +602,7 @@ export class SqliteMobileDataStore implements MobileDataStore {
     input: CashSaleInput,
     idempotencyKey: string,
   ) {
-    if (!/^[A-Za-z0-9][A-Za-z0-9._:-]{7,127}$/.test(idempotencyKey)) {
-      throw new Error('La clave idempotente de la venta no es válida.');
-    }
+    this.assertIdempotencyKey(idempotencyKey);
     if (!snapshot.identity.user.permissions.includes('SALES_MANAGE')) {
       throw new Error('La sesión no permite registrar ventas.');
     }
@@ -547,6 +631,34 @@ export class SqliteMobileDataStore implements MobileDataStore {
     }
     if (money(input.cashReceived) < money(quote.totals.total)) {
       throw new Error('El efectivo recibido no cubre el total de la venta.');
+    }
+  }
+
+  private assertIdempotencyKey(idempotencyKey: string): void {
+    if (!/^[A-Za-z0-9][A-Za-z0-9._:-]{7,127}$/.test(idempotencyKey)) {
+      throw new Error('La clave idempotente no es válida.');
+    }
+  }
+
+  private assertOfflineAuthorization(
+    snapshot: BootstrapSnapshot,
+    permission: string,
+    action: keyof BootstrapSnapshot['freshnessPolicy']['actionTtlSeconds'],
+  ): void {
+    if (!snapshot.identity.user.permissions.includes(permission)) {
+      throw new Error('La sesión no permite esta operación offline.');
+    }
+    const ageSeconds = (Date.now() - Date.parse(snapshot.generatedAt)) / 1000;
+    const expiresAt = Date.parse(snapshot.sessionExpiresAt);
+    if (
+      !Number.isFinite(ageSeconds) ||
+      ageSeconds < -snapshot.freshnessPolicy.maxClockSkewSeconds ||
+      ageSeconds > snapshot.freshnessPolicy.permissionsTtlSeconds ||
+      ageSeconds > snapshot.freshnessPolicy.actionTtlSeconds[action] ||
+      !Number.isFinite(expiresAt) ||
+      Date.now() >= expiresAt
+    ) {
+      throw new Error('La autorización offline venció; conéctate antes de continuar.');
     }
   }
 
@@ -614,6 +726,7 @@ export class SqliteMobileDataStore implements MobileDataStore {
       command.protocolVersion === '1.0' &&
       typeof command.commandId === 'string' &&
       typeof command.sequence === 'number' &&
+      (command.kind === 'CASH_SALE' || command.kind === 'INVENTORY_COUNT') &&
       !!command.scope &&
       this.scopeKey(command.scope) === this.scopeKey(scope)
     );
@@ -732,6 +845,20 @@ function byEntity(
 
 function entityKey(entity: BootstrapSnapshot['entities'][number]): string {
   return `${entity.kind}:${entity.id}`;
+}
+
+function sameCount(
+  left: import('@/pos/contracts').OfflineInventoryCountPayload,
+  right: import('@/pos/contracts').OfflineInventoryCountPayload,
+): boolean {
+  return (
+    left.productId === right.productId &&
+    left.locationId === right.locationId &&
+    left.countedQuantity === right.countedQuantity &&
+    left.snapshotQuantity === right.snapshotQuantity &&
+    left.reason === right.reason &&
+    left.reference === right.reference
+  );
 }
 
 function serializableError(error: unknown): unknown {

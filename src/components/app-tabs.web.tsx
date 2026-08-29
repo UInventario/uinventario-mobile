@@ -22,6 +22,9 @@ export default function AppTabs() {
           <TabTrigger name="pos" href="/pos" asChild>
             <TabButton>Venta</TabButton>
           </TabTrigger>
+          <TabTrigger name="inventory" href="/inventory" asChild>
+            <TabButton>Operar</TabButton>
+          </TabTrigger>
         </View>
       </TabList>
     </Tabs>
