@@ -79,6 +79,20 @@ describe('mobile POS API contract', () => {
     expect(body.commands[0]).not.toHaveProperty('attempts');
     expect(body.commands[0]).not.toHaveProperty('error');
   });
+
+  it('requests incremental changes with the durable device cursor', async () => {
+    const fetchMock = jest.fn().mockResolvedValue(ok({ data: {} }));
+    globalThis.fetch = fetchMock;
+    const api = new HttpMobileApi('https://api.example.test/api/v1');
+
+    await api.changes('token-1', 'device-1', 'signed.cursor');
+
+    const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+    expect(url).toBe(
+      'https://api.example.test/api/v1/offline/changes?protocolVersion=1.0&deviceId=device-1&cursor=signed.cursor&pageSize=500',
+    );
+    expect((init.headers as Headers).get('Authorization')).toBe('Bearer token-1');
+  });
 });
 
 function ok(body: unknown): Response {

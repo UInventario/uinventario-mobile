@@ -2,7 +2,7 @@ import { BootstrapSnapshot, MobileSessionResponse, SessionResponse } from './con
 import { ApiError, MobileApi } from './mobile-api';
 import { CredentialsStore } from './secure-credentials';
 import { SessionManager } from './session-manager';
-import { MobileDataStore } from '@/offline/mobile-data-store';
+import { MobileDataStore, MobileStorageError } from '@/offline/mobile-data-store';
 
 const sessionData: SessionResponse['data'] = {
   user: {
@@ -116,6 +116,79 @@ describe('SessionManager', () => {
 
     expect(api.changeContext).not.toHaveBeenCalled();
   });
+
+  it('continues from the durable cursor after an application restart', async () => {
+    const { manager, api, localData } = setup('stored-token');
+    jest.mocked(localData.snapshot).mockResolvedValueOnce(bootstrap);
+    const synchronized = { ...bootstrap, initialSyncCursor: 'cursor-next' };
+    jest.mocked(api.changes).mockResolvedValueOnce({
+      data: changesData({ nextCursor: 'cursor-next' }),
+    });
+    jest.mocked(localData.applyChanges).mockResolvedValueOnce(synchronized);
+
+    await expect(manager.restore()).resolves.toMatchObject({
+      bootstrap: { initialSyncCursor: 'cursor-next' },
+    });
+
+    expect(api.changes).toHaveBeenCalledWith('mobile-token', 'device-1', 'cursor');
+    expect(api.bootstrap).not.toHaveBeenCalled();
+  });
+
+  it('downloads a new bootstrap when the durable cursor expired', async () => {
+    const { manager, api, localData } = setup('stored-token');
+    jest.mocked(localData.snapshot).mockResolvedValueOnce(bootstrap);
+    jest.mocked(api.changes).mockRejectedValueOnce(
+      new ApiError(410, 'OFFLINE_SYNC_CURSOR_EXPIRED', 'El cursor venció.'),
+    );
+
+    await expect(manager.restore()).resolves.toMatchObject({
+      bootstrap: { initialSyncCursor: 'cursor' },
+    });
+
+    expect(api.bootstrap).toHaveBeenCalledWith('mobile-token', 'device-1');
+    expect(localData.replace).toHaveBeenCalledWith(bootstrap, {
+      data: sessionData,
+      expiresAt: mobileSession.meta.sessionExpiresAt,
+    });
+  });
+
+  it('recovers a damaged local database before rebuilding the bootstrap', async () => {
+    const { manager, localData } = setup('stored-token');
+    jest
+      .mocked(localData.snapshot)
+      .mockRejectedValueOnce(new MobileStorageError('CORRUPT', 'Base dañada'));
+
+    await expect(manager.restore()).resolves.toBeTruthy();
+
+    expect(localData.recover).toHaveBeenCalledTimes(1);
+    expect(localData.replace).toHaveBeenCalledWith(bootstrap, {
+      data: sessionData,
+      expiresAt: mobileSession.meta.sessionExpiresAt,
+    });
+  });
+
+  it('restores a still-authorized local session when the app restarts offline', async () => {
+    const { manager, api, localData } = setup('stored-token');
+    const now = Date.now();
+    const localSession = {
+      data: sessionData,
+      expiresAt: new Date(now + 60 * 60_000).toISOString(),
+      bootstrap: {
+        ...bootstrap,
+        generatedAt: new Date(now - 60_000).toISOString(),
+        sessionExpiresAt: new Date(now + 60 * 60_000).toISOString(),
+      },
+    };
+    jest.mocked(api.refresh).mockRejectedValueOnce(
+      new ApiError(0, 'NETWORK_ERROR', 'Sin conexión'),
+    );
+    jest.mocked(localData.latest).mockResolvedValueOnce(localSession);
+
+    await expect(manager.restore()).resolves.toEqual(localSession);
+
+    expect(localData.latest).toHaveBeenCalledWith('device-1');
+    expect(api.bootstrap).not.toHaveBeenCalled();
+  });
 });
 
 function setup(storedToken: string | null = null) {
@@ -126,6 +199,7 @@ function setup(storedToken: string | null = null) {
     changeContext: jest.fn().mockResolvedValue(mobileSession),
     logout: jest.fn().mockResolvedValue(undefined),
     bootstrap: jest.fn().mockResolvedValue(bootstrap),
+    changes: jest.fn(),
     product: jest.fn().mockResolvedValue({ data: {}, meta: { apiVersion: '1' } }),
     quote: jest.fn(),
     paymentOptions: jest.fn(),
@@ -141,6 +215,10 @@ function setup(storedToken: string | null = null) {
   };
   const localData: MobileDataStore = {
     replace: jest.fn().mockResolvedValue(undefined),
+    snapshot: jest.fn().mockResolvedValue(null),
+    latest: jest.fn().mockResolvedValue(null),
+    applyChanges: jest.fn(),
+    recover: jest.fn().mockResolvedValue(undefined),
     clear: jest.fn().mockResolvedValue(undefined),
     queueCashSale: jest.fn(),
     commands: jest.fn().mockResolvedValue([]),
@@ -153,5 +231,21 @@ function setup(storedToken: string | null = null) {
     api,
     credentials,
     localData,
+  };
+}
+
+function changesData(overrides: Partial<Awaited<ReturnType<MobileApi['changes']>>['data']> = {}) {
+  return {
+    protocolVersion: '1.0' as const,
+    generatedAt: '2026-08-28T00:01:00.000Z',
+    sessionExpiresAt: '2026-08-29T00:00:00.000Z',
+    freshnessPolicy: bootstrap.freshnessPolicy,
+    scope: bootstrap.scope,
+    identity: { user: bootstrap.identity.user },
+    cursor: 'cursor',
+    nextCursor: 'cursor-next',
+    hasMore: false,
+    changes: [],
+    ...overrides,
   };
 }

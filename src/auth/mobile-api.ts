@@ -2,6 +2,7 @@ import {
   BootstrapSnapshot,
   MobileSessionResponse,
   OfflineBootstrapResponse,
+  OfflineChangesResponse,
   ProductDetailResponse,
   SessionContextInput,
   SessionResponse,
@@ -34,6 +35,7 @@ export interface MobileApi {
   changeContext(token: string, input: SessionContextInput): Promise<SessionResponse>;
   logout(token: string): Promise<void>;
   bootstrap(token: string, deviceId: string): Promise<BootstrapSnapshot>;
+  changes(token: string, deviceId: string, cursor: string): Promise<OfflineChangesResponse>;
   product(token: string, id: string): Promise<ProductDetailResponse>;
   quote(token: string, lines: PosCartLineInput[]): Promise<PosQuoteResponse>;
   paymentOptions(token: string): Promise<{ data: { methods: PaymentMethod[] } }>;
@@ -119,6 +121,16 @@ export class HttpMobileApi implements MobileApi {
     }
 
     throw new ApiError(502, 'INCOMPLETE_BOOTSTRAP', 'No fue posible completar el bootstrap.');
+  }
+
+  changes(token: string, deviceId: string, cursor: string) {
+    const query = new URLSearchParams({
+      protocolVersion: '1.0',
+      deviceId,
+      cursor,
+      pageSize: '500',
+    });
+    return this.request<OfflineChangesResponse>(`/offline/changes?${query.toString()}`, { token });
   }
 
   product(token: string, id: string) {

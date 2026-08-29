@@ -136,6 +136,32 @@ export interface OfflineBootstrapResponse {
   };
 }
 
+export interface OfflineChange {
+  changeId: string;
+  operation: 'UPSERT' | 'DELETE';
+  occurredAt: string;
+  entity: BootstrapEntity;
+}
+
+export interface OfflineChangesData {
+  protocolVersion: '1.0';
+  generatedAt: string;
+  sessionExpiresAt: string;
+  freshnessPolicy: OfflineFreshnessPolicy;
+  scope: OfflineBootstrapResponse['data']['scope'];
+  identity: {
+    user: { id: string; roles: string[]; permissions: string[] };
+  };
+  cursor: string;
+  nextCursor: string;
+  hasMore: boolean;
+  changes: OfflineChange[];
+}
+
+export interface OfflineChangesResponse {
+  data: OfflineChangesData;
+}
+
 export interface BootstrapSnapshot {
   protocolVersion: '1.0';
   generatedAt: string;

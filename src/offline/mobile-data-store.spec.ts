@@ -83,6 +83,7 @@ describe('persistent mobile outbox', () => {
     await store.clear();
 
     expect(await storage.getAllKeys()).toEqual([
+      'uinventario-mobile:schema',
       expect.stringContaining('sequence:tenant-1:user-1:10000000-0000-4000-8000-000000000001'),
     ]);
   });
@@ -124,6 +125,171 @@ describe('persistent mobile outbox', () => {
 
     expect([first.sequence, second.sequence]).toEqual([1, 2]);
     expect(await store.pendingCountAll()).toBe(2);
+  });
+
+  it('migrates the legacy bootstrap and restores it after a forced restart', async () => {
+    const storage = new MemoryKeyValueStore();
+    const snapshot = posSnapshot();
+    await storage.setItem('uinventario-mobile:bootstrap', JSON.stringify(snapshot));
+
+    const firstProcess = new SqliteMobileDataStore(storage);
+    expect(await firstProcess.snapshot(snapshot.scope)).toEqual(snapshot);
+    expect(await storage.getItem('uinventario-mobile:bootstrap')).toBeNull();
+
+    const restartedProcess = new SqliteMobileDataStore(storage);
+    expect(await restartedProcess.snapshot(snapshot.scope)).toEqual(snapshot);
+    expect(await storage.getAllKeys()).toEqual(
+      expect.arrayContaining([
+        'uinventario-mobile:schema',
+        expect.stringContaining('snapshot:tenant-1:user-1'),
+      ]),
+    );
+  });
+
+  it('persists non-sensitive session metadata for an authorized offline restart', async () => {
+    const storage = new MemoryKeyValueStore();
+    const snapshot = posSnapshot();
+    const session = {
+      data: {
+        user: {
+          id: 'user-1',
+          email: 'admin@example.com',
+          roles: ['ADMIN'],
+          permissions: ['SALES_MANAGE'],
+        },
+        tenant: { id: 'tenant-1', name: 'Empresa' },
+        context: {
+          branch: { id: 'branch-1', name: 'Centro' },
+          warehouse: { id: 'warehouse-1', name: 'Principal' },
+          cashRegister: { id: 'cash-1', name: 'Caja móvil', code: 'MOB' },
+        },
+        nextStep: 'APPLICATION' as const,
+      },
+      expiresAt: snapshot.sessionExpiresAt,
+    };
+    await new SqliteMobileDataStore(storage).replace(snapshot, session);
+
+    const restored = await new SqliteMobileDataStore(storage).latest(snapshot.scope.deviceId);
+
+    expect(restored).toEqual({ ...session, bootstrap: snapshot });
+    expect(JSON.stringify(restored)).not.toContain('token');
+    expect(JSON.stringify(restored)).not.toContain('password');
+  });
+
+  it('applies upserts and tombstones atomically with the next cursor', async () => {
+    const store = testStore();
+    const snapshot = posSnapshot();
+    await store.replace(snapshot);
+
+    const updated = await store.applyChanges(snapshot.scope, {
+      protocolVersion: '1.0',
+      generatedAt: new Date().toISOString(),
+      sessionExpiresAt: snapshot.sessionExpiresAt,
+      freshnessPolicy: snapshot.freshnessPolicy,
+      scope: snapshot.scope,
+      identity: { user: snapshot.identity.user },
+      cursor: 'cursor',
+      nextCursor: 'cursor-2',
+      hasMore: false,
+      changes: [
+        {
+          changeId: 'change-1',
+          operation: 'UPSERT',
+          occurredAt: new Date().toISOString(),
+          entity: {
+            ...snapshot.entities.find(({ id }) => id === 'product-1')!,
+            version: 2,
+            name: 'Producto actualizado',
+          },
+        },
+        {
+          changeId: 'change-2',
+          operation: 'DELETE',
+          occurredAt: new Date().toISOString(),
+          entity: snapshot.entities.find(({ id }) => id === 'balance-1')!,
+        },
+      ],
+    });
+
+    expect(updated.initialSyncCursor).toBe('cursor-2');
+    expect(updated.entities.find(({ id }) => id === 'product-1')).toMatchObject({
+      version: 2,
+      name: 'Producto actualizado',
+    });
+    expect(updated.entities.find(({ id }) => id === 'balance-1')).toBeUndefined();
+    expect(await store.snapshot(snapshot.scope)).toEqual(updated);
+  });
+
+  it('isolates corrupt data and rebuilds an empty versioned store', async () => {
+    const storage = new MemoryKeyValueStore();
+    const store = new SqliteMobileDataStore(
+      storage,
+      () => '10000000-0000-4000-8000-000000000099',
+    );
+    const snapshot = posSnapshot();
+    await store.replace(snapshot);
+    const command = await store.queueCashSale(
+      snapshot,
+      posQuote(),
+      { lines: [{ productId: 'product-1', quantity: '1' }], cashReceived: '120.00' },
+      'mobile-sale-survives-recovery',
+    );
+    const snapshotKey = (await storage.getAllKeys()).find((key) => key.includes(':snapshot:'))!;
+    await storage.setItem(snapshotKey, '{broken');
+
+    await expect(store.snapshot(snapshot.scope)).rejects.toMatchObject({ code: 'CORRUPT' });
+    await store.recover();
+
+    expect(await store.snapshot(snapshot.scope)).toBeNull();
+    const outboxKey = (await storage.getAllKeys()).find((key) => key.includes(':outbox:'))!;
+    expect(JSON.parse((await storage.getItem(outboxKey))!)).toMatchObject({
+      schemaVersion: 2,
+      scopeKey:
+        'tenant-1:user-1:10000000-0000-4000-8000-000000000001:branch-1:cash-1',
+      commands: [expect.objectContaining({ scope: snapshot.scope })],
+    });
+    expect(await store.commands(snapshot.scope)).toEqual([command]);
+    expect(await storage.getAllKeys()).toEqual(
+      expect.arrayContaining([
+        'uinventario-mobile:schema',
+        expect.stringContaining('sequence:tenant-1:user-1'),
+        expect.stringContaining('outbox:tenant-1:user-1'),
+      ]),
+    );
+  });
+
+  it('keeps server conflicts terminal and available for review', async () => {
+    const store = testStore();
+    const snapshot = posSnapshot();
+    const command = await store.queueCashSale(
+      snapshot,
+      posQuote(),
+      { lines: [{ productId: 'product-1', quantity: '1' }], cashReceived: '120.00' },
+      'mobile-sale-conflict',
+    );
+
+    await store.flush(snapshot.scope, async () => ({
+      data: {
+        results: [
+          {
+            commandId: command.commandId,
+            sequence: command.sequence,
+            status: 'ERROR',
+            replay: false,
+            error: { conflict: { domain: 'STOCK', strategy: 'REVIEW' } },
+          },
+        ],
+      },
+      meta: { apiVersion: '1' },
+    }));
+
+    expect(await store.commands(snapshot.scope)).toEqual([
+      expect.objectContaining({
+        status: 'ERROR',
+        retryable: false,
+        error: { conflict: { domain: 'STOCK', strategy: 'REVIEW' } },
+      }),
+    ]);
   });
 });
 
