@@ -60,5 +60,10 @@
       "**/*.spec.ts"
     ]
   },
+  "overrides": {
+    "xcode": {
+      "uuid": "11.1.1"
+    }
+  },
   "private": true
 }
