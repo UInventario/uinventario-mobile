@@ -12,7 +12,22 @@ import {
 const snapshot: BootstrapSnapshot = {
   protocolVersion: '1.0',
   generatedAt: '2026-08-28T12:00:00.000Z',
+  sessionExpiresAt: '2026-08-29T20:00:00.000Z',
   initialSyncCursor: 'cursor',
+  freshnessPolicy: {
+    version: 1,
+    maxClockSkewSeconds: 300,
+    catalogTtlSeconds: 86400,
+    permissionsTtlSeconds: 3600,
+    actionTtlSeconds: { CASH_SALE: 900, INVENTORY_COUNT: 14400, INVENTORY_MOVEMENT: 3600 },
+  },
+  valuationPolicy: {
+    method: 'MOVING_AVERAGE',
+    version: 1,
+    effectiveAt: '2026-08-28T12:00:00.000Z',
+    migrationRule: 'INITIAL_DEFAULT',
+  },
+  posPolicy: null,
   scope: {
     tenantId: 'tenant-1',
     userId: 'user-1',

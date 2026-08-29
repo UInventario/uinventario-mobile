@@ -5,7 +5,17 @@ import { appEnvironment } from '@/config/environment';
 import { AuthenticatedSession, ProductDetailData, SessionContextInput } from './contracts';
 import { ApiError, HttpMobileApi } from './mobile-api';
 import { SecureCredentialsStore } from './secure-credentials';
-import { MemoryLocalDataStore, SessionManager } from './session-manager';
+import { SessionManager } from './session-manager';
+import { SqliteMobileDataStore, type OfflineFlushSummary } from '@/offline/mobile-data-store';
+import {
+  CashSaleInput,
+  OfflineCommand,
+  PaymentMethod,
+  PosCartLineInput,
+  PosQuote,
+  SaleData,
+  SaleInput,
+} from '@/pos/contracts';
 
 type SessionStatus = 'booting' | 'anonymous' | 'authenticated';
 
@@ -19,6 +29,13 @@ interface SessionContextValue {
   changeContext(input: SessionContextInput): Promise<void>;
   logout(): Promise<void>;
   product(id: string): Promise<ProductDetailData>;
+  quote(lines: PosCartLineInput[]): Promise<PosQuote>;
+  paymentOptions(): Promise<PaymentMethod[]>;
+  cashSale(input: CashSaleInput, idempotencyKey: string): Promise<SaleData>;
+  sale(input: SaleInput, idempotencyKey: string): Promise<SaleData>;
+  queueCashSale(quote: PosQuote, input: CashSaleInput, idempotencyKey: string): Promise<OfflineCommand>;
+  offlineCommands(): Promise<OfflineCommand[]>;
+  flushOffline(): Promise<OfflineFlushSummary>;
   clearError(): void;
 }
 
@@ -30,7 +47,7 @@ export function SessionProvider({ children }: PropsWithChildren) {
       new SessionManager(
         new HttpMobileApi(appEnvironment.apiBaseUrl),
         new SecureCredentialsStore(),
-        new MemoryLocalDataStore(),
+        new SqliteMobileDataStore(),
       ),
     [],
   );
@@ -90,23 +107,38 @@ export function SessionProvider({ children }: PropsWithChildren) {
   }
 
   async function product(id: string): Promise<ProductDetailData> {
-    setBusy(true);
-    setError(null);
-    try {
-      return await manager.product(id);
-    } catch (cause) {
-      setError(messageFor(cause));
-      if (
-        cause instanceof ApiError &&
-        (cause.status === 401 || cause.code === 'BOOTSTRAP_SCOPE_MISMATCH')
-      ) {
-        setSession(null);
-        setStatus('anonymous');
-      }
-      throw cause;
-    } finally {
-      setBusy(false);
-    }
+    return runValue(() => manager.product(id));
+  }
+
+  async function quote(lines: PosCartLineInput[]) {
+    return runValue(() => manager.quote(lines));
+  }
+
+  async function paymentOptions() {
+    return runValue(() => manager.paymentOptions());
+  }
+
+  async function cashSale(input: CashSaleInput, idempotencyKey: string) {
+    return runValue(() => manager.cashSale(input, idempotencyKey));
+  }
+
+  async function sale(input: SaleInput, idempotencyKey: string) {
+    return runValue(() => manager.sale(input, idempotencyKey));
+  }
+
+  async function queueCashSale(quoteValue: PosQuote, input: CashSaleInput, idempotencyKey: string) {
+    if (!session) throw new ApiError(401, 'INVALID_SESSION', 'La sesión no es válida.');
+    return runValue(() => manager.queueCashSale(session, quoteValue, input, idempotencyKey));
+  }
+
+  async function offlineCommands() {
+    if (!session) return [];
+    return manager.offlineCommands(session);
+  }
+
+  async function flushOffline() {
+    if (!session) throw new ApiError(401, 'INVALID_SESSION', 'La sesión no es válida.');
+    return runValue(() => manager.flushOffline(session));
   }
 
   async function run(action: () => Promise<void>) {
@@ -129,6 +161,14 @@ export function SessionProvider({ children }: PropsWithChildren) {
     }
   }
 
+  async function runValue<T>(action: () => Promise<T>): Promise<T> {
+    let value!: T;
+    await run(async () => {
+      value = await action();
+    });
+    return value;
+  }
+
   return (
     <SessionContext.Provider
       value={{
@@ -141,6 +181,13 @@ export function SessionProvider({ children }: PropsWithChildren) {
         changeContext,
         logout,
         product,
+        quote,
+        paymentOptions,
+        cashSale,
+        sale,
+        queueCashSale,
+        offlineCommands,
+        flushOffline,
         clearError: () => setError(null),
       }}>
       {children}
